@@ -1,0 +1,161 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pillow customtkinter tkinterdnd2
+
+      - name: Read app version
+        id: appver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path "core\constants.py" -Pattern 'APP_VERSION\s*=\s*"([^"]+)"'
+          if (-not $line) {
+            Write-Error "Could not find APP_VERSION in core/constants.py"; exit 1
+          }
+          $version = $line.Matches[0].Groups[1].Value
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "App version: $version"
+
+      - name: Install ExifTool
+        shell: pwsh
+        run: |
+          choco install exiftool -y --no-progress
+
+          # IMPORTANT: since ExifTool v13.33 (mid-2024), the Windows
+          # distribution is NOT a single self-contained binary anymore —
+          # it's a small exiftool.exe launcher (~50-60 KB, this is normal
+          # and correct) plus a required "exiftool_files" folder sitting
+          # right next to it with the Perl runtime it needs. Move the exe
+          # without that folder and the launcher can't find its own
+          # support files at runtime — which is exactly the
+          # "Cannot find file at '..\lib\exiftool\tools\...\exiftool.exe'"
+          # error this app was hitting. Don't trust `Get-Command`/PATH
+          # either — that resolves to a Chocolatey shim in ...\bin, a
+          # different, separate stub that's even less useful bundled
+          # standalone. Grab the real exe AND its exiftool_files folder
+          # together from choco's lib/tools directory.
+          $realExe = Get-ChildItem "C:\ProgramData\chocolatey\lib\exiftool\tools" `
+            -Recurse -Filter "exiftool.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $realExe) {
+            Write-Error "Could not find exiftool.exe under chocolatey\lib\exiftool\tools — choco install may have failed or the package layout changed."
+            exit 1
+          }
+          $srcDir = $realExe.Directory.FullName
+          $filesDir = Join-Path $srcDir "exiftool_files"
+          if (-not (Test-Path $filesDir)) {
+            Write-Error "Found exiftool.exe at $($realExe.FullName) but no sibling exiftool_files folder — the app will crash at runtime without it. Check the installed exiftool package layout."
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path "C:\ExifTool" | Out-Null
+          Copy-Item $realExe.FullName "C:\ExifTool\exiftool.exe" -Force
+          Copy-Item $filesDir "C:\ExifTool\exiftool_files" -Recurse -Force
+          Write-Host "ExifTool exe: $((Get-Item 'C:\ExifTool\exiftool.exe').Length) bytes (from $($realExe.FullName))"
+          Write-Host "exiftool_files: $((Get-ChildItem 'C:\ExifTool\exiftool_files' -Recurse | Measure-Object).Count) files copied"
+
+      - name: Get tkinterdnd2 bundle path
+        id: tkdnd
+        shell: pwsh
+        run: |
+          $path = python -c "import tkinterdnd2, os; print(os.path.dirname(tkinterdnd2.__file__))"
+          echo "path=$path" >> $env:GITHUB_OUTPUT
+          Write-Host "tkinterdnd2 at: $path"
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          $icon_arg = ""
+          if (Test-Path "icon.ico") { $icon_arg = "--icon=icon.ico" }
+          elseif (Test-Path "icon.png") { $icon_arg = "--icon=icon.png" }
+
+          $tkdnd_path = "${{ steps.tkdnd.outputs.path }}"
+
+          $pyinstaller_args = @(
+            "--onefile",
+            "--windowed",
+            "--name=MetaZone",
+            "--add-data=C:\ExifTool\exiftool.exe;exiftool_pkg",
+            "--add-data=C:\ExifTool\exiftool_files;exiftool_pkg\exiftool_files",
+            "--add-data=${tkdnd_path};tkinterdnd2",
+            "--hidden-import=tkinterdnd2",
+            "--hidden-import=tkinterdnd2.TkinterDnD",
+            "--collect-all=tkinterdnd2",
+            "--hidden-import=PIL._tkinter_finder"
+          )
+
+          if ($icon_arg) { $pyinstaller_args += $icon_arg }
+          if (Test-Path "icon.png") { $pyinstaller_args += "--add-data=icon.png;." }
+
+          $pyinstaller_args += "app.py"
+
+          Write-Host "pyinstaller $($pyinstaller_args -join ' ')"
+          & python -m PyInstaller @pyinstaller_args
+
+      - name: Verify EXE was created
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\MetaZone.exe") {
+            Write-Host "SUCCESS: $((Get-Item 'dist\MetaZone.exe').Length / 1MB) MB"
+          } else {
+            Write-Error "MetaZone.exe not found!"; exit 1
+          }
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MetaZone-Windows
+          path: dist\MetaZone.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.appver.outputs.version }}
+          name: Meta Zone ${{ steps.appver.outputs.version }}
+          body: |
+            ## Meta Zone ${{ steps.appver.outputs.version }}
+
+            ### ✨ Metadata AI Tab
+            - Generate title, description & keywords from images using AI
+            - Providers: Gemini (free) · OpenRouter (free) · Mistral · Groq · OpenAI · Claude
+            - Prompt generation mode for AI image prompts
+            - Drag & drop support for bulk import
+            - Paginated queue — handles 1000+ files without freezing
+            - Single-word keyword mode
+            - Per-card model badge showing which API key was used
+            - Inline character / keyword counters on every field
+
+            ### 📋 Embed Metadata Tab
+            - Batch embed CSV metadata into JPEG/PNG/EPS/AI/MP4/MOV
+            - Match Filename Only toggle · Sub-folder search
+            - Remove software/program name from EXIF
+            - Activity log with timestamps
+
+            ### How to use
+            1. Download **MetaZone.exe** — double-click, no install needed
+            2. Open **API Configuration**, add your API key(s)
+            3. Drop images onto the upload zone (or click to browse)
+            4. Click **Generate Batch**
+            5. Download CSV, or switch to **Embed** tab to write metadata into files
+          files: dist\MetaZone.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
