@@ -3,7 +3,7 @@ keyword/title/description rules, supported file extensions. No logic
 here — just data other modules read.
 """
 
-APP_VERSION = "v0.1"  # bump this on each major update: v0.2, v0.3, ...
+APP_VERSION = "v0.2"  # bump this on each major update: v0.3, v0.4, ...
 
 AI_PROVIDERS = {
     "OpenRouter": {
@@ -84,10 +84,11 @@ AI_PROVIDERS = {
 
 CONTENT_SUFFIXES = {
     "Auto Detect":       "",
-    "JPG":               "",
-    "Vector":            "This is a vector illustration.",
-    "Transparent PNG":   "isolated on transparent background",
-    "White Background":  "isolated on solid white background",
+    "Vector":            "a vector illustration",
+    "Illustration":      "a digital illustration/artwork, not a photograph",
+    "Transparent PNG":   "isolated on a transparent background",
+    "White Background":  "on a solid white background",
+    "Silhouette":        "presented as a silhouette",
 }
 
 IMAGE_EXTS  = {'.jpg','.jpeg','.png','.gif','.webp','.tiff','.tif'}
@@ -105,7 +106,7 @@ HIDDEN_PROVIDERS={"Grok","Groq"}
 VISIBLE_PROVIDERS=[p for p in AI_PROVIDERS_ORDERED if p not in HIDDEN_PROVIDERS]
 
 PLATFORM_RULES = {
-    "General":      {"kw":49,"title":150,"desc":250},
+    "General":      {"kw":49,"title":300,"desc":250},
     "Adobe Stock":  {"kw":49,"title":150,"desc":250},
     "Shutterstock": {"kw":50,"title":200,"desc":200},
     "Getty Images": {"kw":50,"title":200,"desc":500},
