@@ -134,17 +134,18 @@ class MetaResultCard(ctk.CTkFrame):
             border_width=1,border_color=AMB_BTN,corner_radius=8,command=on_redo)
         self._redo_btn.grid(row=5,column=0,sticky="ew")
 
-        if self._on_toggle_expand:
-            exp_btn=ctk.CTkButton(self,text="⌃",width=24,height=24,
-                font=ctk.CTkFont("Segoe UI",12,"bold"),
-                fg_color=BG4,hover_color=BG3,text_color=TXT2,
-                corner_radius=8,command=self._on_toggle_expand)
-            exp_btn.place(relx=1.0,x=-6,y=6,anchor="ne")
-
         if self.mode=="prompt":
             self._build_prompt_fields()
         else:
             self._build_meta_fields()
+
+        if self._on_toggle_expand:
+            self._exp_btn=ctk.CTkButton(self,text="⌃  Collapse",width=90,height=24,
+                font=ctk.CTkFont("Segoe UI",10,"bold"),
+                fg_color=BG4,hover_color=BG3,text_color=TXT2,
+                corner_radius=8,command=self._on_toggle_expand)
+            self._exp_btn.place(relx=1.0,x=-8,y=6,anchor="ne")
+            self._exp_btn.lift()
 
         self._refresh_status()
 
@@ -262,7 +263,7 @@ class MetaResultCard(ctk.CTkFrame):
         title_col.grid(row=0,column=1,sticky="nsew",
             padx=(6,4) if self._show_desc else (6,8),pady=(8,4))
         title_col.grid_columnconfigure(0,weight=1)
-        self._build_field_box(title_col,"title","Title",title,CYAN,56)
+        self._build_field_box(title_col,"title","Title",title,CYAN,84)
 
         if self._show_desc:
             desc_col=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
@@ -278,7 +279,7 @@ class MetaResultCard(ctk.CTkFrame):
         kw_wrap.grid(row=1,column=1,columnspan=(2 if self._show_desc else 1),
             sticky="ew",padx=(6,8),pady=(0,8))
         kw_wrap.grid_columnconfigure(0,weight=1)
-        self._build_field_box(kw_wrap,"kw","Keywords",kw,GRN,90)
+        self._build_field_box(kw_wrap,"kw","Keywords",kw,GRN,63)
 
     def _build_field_box(self,parent,key,label,val,color,height):
         hdr=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
