@@ -3,8 +3,14 @@ generation mode)."""
 
 def build_meta_prompt(title_c, desc_c, kw_n, custom_prompt="",
                       single_kw=False, themes="", prefix="", suffix_title="",
-                      avoid_copyright=False, include_desc=True):
+                      avoid_copyright=False, include_desc=True, content_phrase=""):
     directives = []
+    if content_phrase:
+        directives.append(
+            f"This image is: {content_phrase}. This is a MANDATORY, TOP-PRIORITY fact — "
+            f"the title MUST explicitly state it (using this phrase or an equivalent), "
+            f"mentioned before other stylistic details, not left out or left to chance."
+        )
     if themes:
         directives.append(f"Content theme: {themes}. Reflect this in the metadata.")
     if single_kw:
@@ -46,7 +52,11 @@ def build_meta_prompt(title_c, desc_c, kw_n, custom_prompt="",
             f"This is for a stock photo search listing — a short, generic, or vague title hurts "
             f"discoverability, so use as much of the allowed length as you can. Describe the "
             f"subject, action, setting, mood AND style in one flowing descriptive sentence — do "
-            f"NOT just name the subject in a few words.{prefix_note}{suffix_note}\n"
+            f"NOT just name the subject in a few words. The title MUST end as a complete, "
+            f"well-formed sentence or phrase — NEVER cut off mid-word or mid-clause. If you are "
+            f"close to the character limit, wrap the sentence up early rather than let it run out "
+            f"unfinished; a shorter complete title is always better than a longer incomplete "
+            f"one.{prefix_note}{suffix_note}\n"
             f"2. KEYWORDS: Write EXACTLY {kw_n} keywords separated by commas. "
             f"No fewer, no more. Sort by relevance — most specific first. "
             f"No duplicates. No brand names. Cover subject/action/setting/mood/color/style.\n"
@@ -72,13 +82,19 @@ def build_meta_prompt(title_c, desc_c, kw_n, custom_prompt="",
         f"This is for a stock photo search listing — a short, generic, or vague title hurts "
         f"discoverability, so use as much of the allowed length as you can. Describe the "
         f"subject, action, setting, mood AND style in one flowing descriptive sentence — do "
-        f"NOT just name the subject in a few words.{prefix_note}{suffix_note}\n"
+        f"NOT just name the subject in a few words. The title MUST end as a complete, "
+        f"well-formed sentence or phrase — NEVER cut off mid-word or mid-clause. If you are "
+        f"close to the character limit, wrap the sentence up early rather than let it run out "
+        f"unfinished; a shorter complete title is always better than a longer incomplete "
+        f"one.{prefix_note}{suffix_note}\n"
         f"2. KEYWORDS: Write EXACTLY {kw_n} keywords separated by commas. "
         f"No fewer, no more. Sort by relevance — most specific first. "
         f"No duplicates. No brand names. Cover subject/action/setting/mood/color/style. "
         f"Write this field BEFORE the description.\n"
         f"3. DESCRIPTION: {max(desc_c-30,20)}–{desc_c} characters. Include subject, "
-        f"mood, setting, use-case, colors.\n"
+        f"mood, setting, use-case, colors. Just like the title, it MUST end as a complete "
+        f"sentence — never cut off mid-word or mid-clause; finish the thought early rather "
+        f"than run out of room unfinished.\n"
         f"4. Output ONLY the 3 lines. No preamble, no markdown, no numbering, "
         f"no extra explanation.{directive_block}"
     )
