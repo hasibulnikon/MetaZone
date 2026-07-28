@@ -1,5 +1,109 @@
 # Changelog
 
+## v0.2
+
+### Manual edits getting lost after scrolling (data loss — found root cause)
+- Confirmed the real cause: the virtualized list destroys card widgets
+  once they scroll out of view, but nothing ever read their edited
+  text boxes back into the app's data first — so any hand-edited
+  title/description/keywords were silently gone the moment that card
+  was torn down, even before Save or Export was ever touched.
+- Fixed at the root: every place a card gets destroyed (scrolled out
+  of view, or collapsed/expanded) now reads its current text boxes
+  back into the saved data first. Verified directly: edited a title,
+  scrolled it far out of view (destroying the widget), and the edit
+  was still there afterward.
+- Also caught and fixed a second bug this surfaced: the first version
+  of this fix merged the card's *entire* snapshot back (not just the
+  edited text), which included a stale "status" field frozen at the
+  moment the card was built — silently reverting a live status (e.g.
+  "done" back to "waiting") on sync. Fixed to only sync the actual
+  editable text fields.
+- New **Save** button (top-right of the Generate tab, where Embed
+  used to sit before it moved to the header): syncs every
+  currently-open card's edits, then writes them straight to the
+  working CSV on disk — no need to go through Export CSV's save
+  dialog first, and it updates the same file whether or not you've
+  manually exported yet.
+
+### Floating scroll buttons
+- Two arrow buttons, bottom-right of the card list, scroll exactly 3
+  rows (a full screen, since 3 cards fit the viewport) per click —
+  using the real per-card heights, so it still moves by exactly 3
+  cards even with some individually expanded.
+
+### Card overlap / missing collapse button (large batches)
+- Root cause: the virtualized list used ONE fixed row-height estimate
+  for the whole batch, so an individually-expanded card inside an
+  otherwise-compact batch didn't get a taller row slot reserved for
+  it — it just overflowed into the next row. Replaced with a real
+  per-row cumulative-height table: each row is exactly as tall as its
+  own card actually is, and every row after an expand/collapse shifts
+  accordingly. Verified with an 80-file batch and two cards expanded
+  simultaneously — no overlap.
+- The collapse button was real but was getting visually covered by the
+  description box's copy/paste buttons in the same corner (a z-order
+  issue — it was built before those buttons instead of after). Moved
+  it to build last and explicitly raised above everything else, and
+  made it a labeled "⌃ Collapse" button instead of a tiny glyph so
+  it's easier to spot.
+
+### Scroll speed
+- Mouse wheel scrolling felt sluggish because each wheel notch only
+  moved ~20px against 130–274px tall rows. Increased the canvas's
+  scroll increment (not touching CustomTkinter's shared event
+  bindings) so a notch now covers roughly a full row.
+
+### Sentence-completion fix (title/description)
+- Prompt now explicitly tells the model to always finish as a complete
+  sentence within the requested length — wrap up early rather than run
+  out unfinished.
+- Added `smart_trim()`: if a title still exceeds the limit, it's cut at
+  the last complete sentence boundary instead of an arbitrary word
+  boundary, so it never reads as cut off mid-thought.
+
+### File type / content-type directives
+- New "File Type" dropdown, right under Platform, styled like it —
+  no longer buried in Advanced Options. Six options: Auto Detect,
+  Vector, Illustration, Transparent PNG, White Background, Silhouette.
+- Each option is now a MANDATORY, top-priority prompt directive (not a
+  loose style hint) — Vector titles state the image is a vector
+  illustration, Transparent PNG mandates mentioning the transparent
+  background, White Background adds "on a solid white background",
+  Silhouette states it's presented as a silhouette.
+- `smart_trim()` now takes a `must_include` phrase: if trimming would
+  cut off the mandatory content-type phrase, it shrinks the rest of the
+  sentence further to make room instead, and appends the phrase if the
+  model left it out entirely but there's still room.
+- Moved Single Word Keywords into Advanced Options.
+
+### Platform / title length
+- Named platforms (Shutterstock, Getty, Adobe Stock, etc.) keep their
+  real recommended title caps unchanged.
+- The "General" platform preset's title cap raised from 150 to 300 —
+  use this when you want the longer title and don't need to match a
+  specific site's limit.
+
+### Header
+- Added a "Metadata AI" / "Embed" button pair to the title bar.
+  "Metadata AI" is an inert, button-styled label showing the current
+  mode (dark/gray, white text); "Embed" is a real button (green,
+  black text, matching Generate/API Configuration) that opens the
+  Embed window. Removed the now-redundant old Embed button from the
+  Generate tab's toolbar.
+
+### Embed window
+- Fixed the dead space below "Start Embedding" — the window was
+  hardcoded to 640px tall but the form only needs ~546px. Now opens at
+  570px with a matching minsize.
+
+### Architecture
+- Added `workers/task_manager.py`: a bounded `ThreadPoolExecutor`-based
+  worker pool, replacing the manual `threading.Thread` + `Semaphore`
+  pair used for AI generation batches. Pause/stop/retry/progress
+  semantics are unchanged — this is a mechanical swap of the
+  concurrency primitive, not a behavior change.
+
 ## v0.1
 Version reset to v0.1 as the new baseline. From here, each major update
 bumps the version (v0.2, v0.3, ...) — edit `APP_VERSION` in
