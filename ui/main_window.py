@@ -2,18 +2,18 @@
 (card list, virtualization, generation pipeline), Prompt-generation
 mode, and CSV export. Everything else (API keys, embedding) opens as
 its own popup window from here."""
-import os, csv, threading, datetime, queue
+import os, csv, threading, datetime, queue, bisect
 import tkinter
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar, IntVar
 
-from core.constants import (APP_VERSION, PLATFORM_RULES,
+from core.constants import (APP_VERSION, PLATFORM_RULES, CONTENT_SUFFIXES,
     VECTOR_EXTS, VIDEO_EXTS, ALL_SUPPORTED_EXTS)
 from core.config import load_prefs, save_prefs
 from core.utils import find_exiftool, check_online, make_thumb, model_label
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
-from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords
+from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_BTN_H,AMB_DIM,
     CYAN,ABSOLUTE_BG,VIRT_BUFFER)
@@ -21,6 +21,7 @@ from ui.dnd import DnDCTk, DND_AVAILABLE, DND_FILES
 from ui.api_dialog import APIManagerWindow
 from ui.embed_window import EmbedWindow
 from ui.widgets import ImportProgressDialog, MetaResultCard
+from workers.task_manager import TaskManager
 
 class App(DnDCTk):
     VERSION=APP_VERSION
@@ -40,6 +41,12 @@ class App(DnDCTk):
         self._path_idx={}; self._expanded_paths=set(); self._source_folder=""
         self._compact_mode=False; self._gen_epoch=0
         self._show_desc_mode=True
+        self._task_mgr=TaskManager()
+        # Per-row cumulative pixel heights (see _row_h_for/_rebuild_cum_heights/
+        # _append_cum_height below) — replaces a single uniform row-height
+        # estimate, which is what let an individually-expanded card inside an
+        # otherwise-compact batch overlap the row below it.
+        self._cum_heights=[0]
 
         # AI settings
         self.ai_title_var    =StringVar(value=str(self.prefs.get("title_len",130)))
@@ -56,8 +63,9 @@ class App(DnDCTk):
         self.ai_suffix_on_var=BooleanVar(value=False)
         self.ai_prefix_text_var=StringVar(value=self.prefs.get("prefix_text",""))
         self.ai_suffix_text_var=StringVar(value=self.prefs.get("suffix_text",""))
+        self.ai_content_type_var=StringVar(value=self.prefs.get("content_type","Auto Detect"))
         self._style_vars={}
-        for s in ["Silhouette","White Background","Transparent","Vector","Videos"]:
+        for s in ["Videos"]:
             self._style_vars[s]=BooleanVar(value=False)
 
         self._build_ui()
@@ -146,9 +154,30 @@ class App(DnDCTk):
         ).grid(row=0,column=0,padx=(16,8),pady=13)
         ctk.CTkLabel(tb,text="Meta Zone",font=ctk.CTkFont("Segoe UI",18,"bold"),
             text_color=TXT,fg_color=BG2).grid(row=0,column=1,sticky="w")
-        ctk.CTkLabel(tb,text=self.VERSION,font=ctk.CTkFont("Segoe UI",9,"bold"),
+        mid=ctk.CTkFrame(tb,fg_color=BG2,corner_radius=0)
+        mid.grid(row=0,column=2,sticky="ew",padx=(8,0))
+        ctk.CTkLabel(mid,text=self.VERSION,font=ctk.CTkFont("Segoe UI",9,"bold"),
             text_color=GRN,fg_color=GRN_DIM,corner_radius=20,padx=8,pady=2
-        ).grid(row=0,column=2,sticky="w",padx=(8,0))
+        ).pack(side="left")
+
+        # "Metadata AI" looks like a button (same shape/size family as the
+        # Embed button next to it) but is inert — it's just showing which
+        # mode is currently active, not something to click. Embed opens
+        # the Embed window, styled to visually pair with it: dark/gray +
+        # white text here, green + black text there (matching the
+        # Generate/API Configuration button look).
+        ctk.CTkButton(mid,text="Metadata AI",width=112,height=30,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=BG4,hover_color=BG4,text_color=TXT,
+            border_width=0,corner_radius=8,
+            cursor="arrow",state="disabled",text_color_disabled=TXT
+        ).pack(side="left",padx=(14,4))
+        ctk.CTkButton(mid,text="📋  Embed",width=112,height=30,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
+            border_width=0,corner_radius=8,
+            command=self._open_embed
+        ).pack(side="left")
         of=ctk.CTkFrame(tb,fg_color=BG3,corner_radius=20)
         of.grid(row=0,column=3,padx=(0,16),pady=12)
         self._online_dot=ctk.CTkLabel(of,text="●",font=ctk.CTkFont("Segoe UI",16),
@@ -258,7 +287,26 @@ class App(DnDCTk):
         self._plat_combo.bind("<Button-4>",lambda e:self._on_platform_scroll(e,-1))
         self._plat_combo.bind("<Button-5>",lambda e:self._on_platform_scroll(e,1))
 
-        self._title_sl=self._slider(msf,"Title Length",self.ai_title_var,10,200,int(self.ai_title_var.get()))
+        # File Type — sits right under Platform, same dropdown style. This
+        # drives a MANDATORY title directive (see engine/prompt_generator),
+        # not just a loose "theme" hint, so Vector/Transparent PNG/White
+        # Background actually show up in the title reliably instead of at
+        # the model's discretion.
+        ftype_row=ctk.CTkFrame(msf,fg_color=BG2,corner_radius=0)
+        ftype_row.pack(fill="x",padx=10,pady=(0,6)); ftype_row.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(ftype_row,text="File Type",font=ctk.CTkFont("Segoe UI",11),
+            text_color=TXT2,fg_color=BG2).grid(row=0,column=0,sticky="w")
+        self._ftype_combo=ctk.CTkComboBox(msf,variable=self.ai_content_type_var,
+            values=list(CONTENT_SUFFIXES.keys()),state="readonly",
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=BG3,text_color=CYAN,border_color=GLASS_BDR,border_width=2,
+            button_color=CYAN,button_hover_color=GRN_H,
+            dropdown_fg_color=BG4,dropdown_text_color=TXT,dropdown_hover_color=GRN_DIM,
+            dropdown_font=ctk.CTkFont("Segoe UI",11),
+            corner_radius=8,height=36,command=lambda _=None:self._save_settings())
+        self._ftype_combo.pack(fill="x",padx=10,pady=(0,8))
+
+        self._title_sl=self._slider(msf,"Title Length",self.ai_title_var,10,300,int(self.ai_title_var.get()))
         self._desc_sl =self._slider(msf,"Description Length",self.ai_desc_var,20,500,int(self.ai_desc_var.get()))
 
         # Generate Description toggle — off by default request: most of the
@@ -285,15 +333,8 @@ class App(DnDCTk):
 
         self._kw_sl   =self._slider(msf,"Keywords Count",self.ai_kw_var,5,49,int(self.ai_kw_var.get()))
 
-        # Single keyword toggle (Avoid Copyright now lives inside Advanced Options)
-        rf=ctk.CTkFrame(msf,fg_color=BG2,corner_radius=0)
-        rf.pack(fill="x",padx=10,pady=(1,1)); rf.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(rf,text="Single Word Keywords",font=ctk.CTkFont("Segoe UI",11),
-            text_color=TXT2,fg_color="transparent").grid(row=0,column=0,sticky="w")
-        ctk.CTkSwitch(rf,text="",variable=self.ai_single_kw_var,
-            progress_color=GRN,button_color=TXT,fg_color=GLASS_BDR,
-            onvalue=True,offvalue=False,width=46,height=24,command=self._save_settings
-        ).grid(row=0,column=1,sticky="e")
+        # Single Word Keywords now lives inside Advanced Options (see below)
+
 
         # Anchor for stable mode switch
         self._sl_anchor=ctk.CTkFrame(inner,fg_color=BG2,height=0,corner_radius=0)
@@ -336,7 +377,7 @@ class App(DnDCTk):
         # Content themes inside advanced
         ctk.CTkLabel(ab,text="CONTENT THEMES",font=ctk.CTkFont("Segoe UI",9,"bold"),
             text_color=TXT3,fg_color=BG2).pack(anchor="w",padx=12,pady=(8,2))
-        for s in ["Silhouette","White Background","Transparent","Vector","Videos"]:
+        for s in ["Videos"]:
             rf2=ctk.CTkFrame(ab,fg_color=BG2,corner_radius=0)
             rf2.pack(fill="x",padx=10,pady=1); rf2.grid_columnconfigure(0,weight=1)
             ctk.CTkLabel(rf2,text=s,font=ctk.CTkFont("Segoe UI",11),
@@ -372,6 +413,18 @@ class App(DnDCTk):
             sw.grid(row=0,column=1,sticky="e")
 
         ctk.CTkFrame(ab,fg_color=GLASS_BDR,height=1,corner_radius=0).pack(fill="x",padx=8,pady=6)
+
+        ctk.CTkFrame(ab,fg_color=GLASS_BDR,height=1,corner_radius=0).pack(fill="x",padx=8,pady=6)
+
+        # Single Word Keywords — moved here from the always-visible section
+        rf4=ctk.CTkFrame(ab,fg_color=BG2,corner_radius=0)
+        rf4.pack(fill="x",padx=10,pady=(0,2)); rf4.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(rf4,text="Single Word Keywords",font=ctk.CTkFont("Segoe UI",11),
+            text_color=TXT2,fg_color="transparent").grid(row=0,column=0,sticky="w")
+        ctk.CTkSwitch(rf4,text="",variable=self.ai_single_kw_var,
+            progress_color=GRN,button_color=TXT,fg_color=GLASS_BDR,
+            onvalue=True,offvalue=False,width=46,height=24,command=self._save_settings
+        ).grid(row=0,column=1,sticky="e")
 
         # Avoid Copyright — moved inside Advanced Options
         rf3=ctk.CTkFrame(ab,fg_color=BG3,corner_radius=8,border_width=1,border_color=GLASS_BDR)
@@ -411,7 +464,7 @@ class App(DnDCTk):
             idx=self._path_idx.get(p)
             if idx is None:
                 idx=len(self._path_idx); self._path_idx[p]=idx
-        self._row_height=self._estimate_row_height()
+        self._rebuild_cum_heights()
         self._update_virtual_height()
         self._reconcile_visible()
 
@@ -510,6 +563,7 @@ class App(DnDCTk):
             "prefix_text":self.ai_prefix_text_var.get(),
             "suffix_text":self.ai_suffix_text_var.get(),
             "include_desc":self.ai_include_desc_var.get(),
+            "content_type":self.ai_content_type_var.get(),
         })
         save_prefs(self.prefs)
 
@@ -597,12 +651,16 @@ class App(DnDCTk):
             command=self._export_csv)
         self._export_btn.pack(side="left",padx=(0,5))
 
-        self._embed_btn=ctk.CTkButton(btn_f,text="📋  Embed",width=90,height=32,
+        # Manual-edit save: syncs any hand-edited title/description/
+        # keywords from currently-materialized cards into self._results
+        # and writes the working CSV in place — doesn't require going
+        # through Export CSV's save dialog first.
+        self._save_btn=ctk.CTkButton(btn_f,text="💾  Save",width=96,height=32,
             font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,
-            border_width=1,border_color=GLASS_BDR,corner_radius=8,
-            command=self._open_embed)
-        self._embed_btn.pack(side="left")
+            fg_color=GRN_DIM,hover_color=GRN_H,text_color=GRN,
+            border_width=1,border_color=GRN,corner_radius=8,
+            command=self._save_now)
+        self._save_btn.pack(side="left",padx=(0,5))
 
         # UPLOAD BAR — slim text-only strip (thumbnails now live inside each
         # card, so this no longer needs to reserve grid space for them). The
@@ -653,11 +711,35 @@ class App(DnDCTk):
         self._gen_scroll=ctk.CTkScrollableFrame(gen,fg_color="transparent",
             scrollbar_button_color=BG3,scrollbar_button_hover_color=BG4,corner_radius=0)
         self._gen_scroll.grid(row=1,column=0,sticky="nsew",padx=6,pady=(4,6))
+        try:
+            cur_incr=int(self._gen_scroll._parent_canvas.cget("yscrollincrement") or 1)
+            self._gen_scroll._parent_canvas.configure(yscrollincrement=max(cur_incr*8,8))
+        except Exception:
+            pass
 
         self._gen_empty_lbl=ctk.CTkLabel(self._gen_scroll,
             text="Results will appear here after generation.",
             font=ctk.CTkFont("Segoe UI",12),text_color=TXT3,fg_color="transparent")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
+
+        # Floating scroll buttons — jump exactly 3 rows (a full screen's
+        # worth, since 3 cards fit the viewport) using the real per-row
+        # cumulative heights, so it works correctly even with some cards
+        # individually expanded. Placed on `gen` (not `_gen_scroll`) so
+        # they float above the list instead of scrolling away with it.
+        self._scroll_down_btn=ctk.CTkButton(gen,text="▼",width=36,height=36,
+            font=ctk.CTkFont("Segoe UI",14,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            border_width=1,border_color=GLASS_BDR,corner_radius=18,
+            command=lambda:self._scroll_cards_by(3))
+        self._scroll_down_btn.place(relx=1.0,rely=1.0,x=-14,y=-14,anchor="se")
+        self._scroll_up_btn=ctk.CTkButton(gen,text="▲",width=36,height=36,
+            font=ctk.CTkFont("Segoe UI",14,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            border_width=1,border_color=GLASS_BDR,corner_radius=18,
+            command=lambda:self._scroll_cards_by(-3))
+        self._scroll_up_btn.place(relx=1.0,rely=1.0,x=-14,y=-56,anchor="se")
+        self._scroll_down_btn.lift(); self._scroll_up_btn.lift()
 
         # ── Card virtualization ──────────────────────────────────────────
         # Only ever build real card widgets for what's actually near the
@@ -677,7 +759,6 @@ class App(DnDCTk):
         # compact-mode batch can slightly overlap its neighbor since its
         # real height won't match the estimate, which is a cosmetic edge
         # case, not a functional one.
-        self._row_height=254
         self._scroll_poll_id=None
         self._start_scroll_poll()
 
@@ -767,7 +848,7 @@ class App(DnDCTk):
         # import got built as heavy/expanded before the count crossed the
         # threshold, and only the rest went compact.
         self._compact_mode=(len(self._all_paths)+len(new))>60
-        self._row_height=self._estimate_row_height()
+        self._rebuild_cum_heights()
         if len(new)>15:
             self._import_with_progress(new)
         else:
@@ -810,34 +891,75 @@ class App(DnDCTk):
         idx=self._path_idx.get(path)
         if idx is None:
             idx=len(self._path_idx); self._path_idx[path]=idx
+            self._append_cum_height(path)
         self._update_virtual_height()
         self._reconcile_visible()
         self._update_desc_toggle_lock()
         return self._card_by_path.get(path)
 
-    def _estimate_row_height(self):
-        """Must track MetaResultCard's actual built height for the current
-        mode — every element in that layout has a FIXED pixel height by
-        design (CTkTextbox doesn't grow with content, it scrolls
-        internally), so as long as this number matches what's actually
-        built, cards can never overlap in the virtualized list regardless
-        of content length. These numbers came from directly measuring
-        winfo_reqheight() on one real built card of each kind (+ a small
-        safety margin for font-rendering variance across systems) rather
-        than hand-calculated pixel budgets, which were off by a
-        surprising amount in practice."""
-        if self._compact_mode:
-            return 134
-        if self.current_mode=="prompt":
-            return 238
-        return 274
+    def _scroll_cards_by(self,n):
+        """Scroll the results list by exactly n rows (+3 down / -3 up per
+        click), using the real per-row cumulative heights — this moves by
+        n whole cards regardless of any of them being individually
+        expanded, unlike a flat pixel-based scroll."""
+        cum=self._cum_heights
+        if len(cum)<2: return
+        total_h=cum[-1]
+        if total_h<=0: return
+        canvas=self._gen_scroll._parent_canvas
+        top_frac,_=canvas.yview()
+        top_px=top_frac*total_h
+        cur_idx=max(bisect.bisect_right(cum,top_px)-1,0)
+        target_idx=max(0,min(cur_idx+n,len(cum)-2))
+        canvas.yview_moveto(cum[target_idx]/total_h)
 
-    def _scaled_row_h(self):
-        """Row height in actual pixels, after CTk's widget-scaling factor —
-        must match what _place_card_for uses for card y-positions, or the
-        spacer height and the visible-range math drift out of sync with
-        where cards actually render on a non-default DPI scaling setting."""
-        return self._gen_scroll._apply_widget_scaling(self._row_height)
+    def _row_h_for(self,path):
+        """Effective (unscaled) row height for THIS specific card, based on
+        its own current expand state — not one value for the whole batch.
+        This is what fixes cards overlapping when a single card is expanded
+        inside an otherwise-compact large batch: that row now actually
+        reserves the taller slot it needs instead of reserving the same
+        slot as every other (compact) row."""
+        base_expanded=238 if self.current_mode=="prompt" else 274
+        if not getattr(self,'_compact_mode',False):
+            return base_expanded
+        return base_expanded if path in self._expanded_paths else 134
+
+    def _rebuild_cum_heights(self):
+        """Full prefix-sum rebuild: cum[i] = pixel Y-start of row i,
+        cum[-1] = total virtual list height. Only called on batch-wide
+        events (mode switch, clear, expand/collapse toggle) — all rare,
+        user-triggered actions — never in the per-card add loop or the
+        scroll-poll, where an O(n) rebuild every call would actually hurt
+        the load-time/scroll-smoothness this virtualization exists for."""
+        order=sorted(self._path_idx.items(), key=lambda kv: kv[1])
+        scale=self._gen_scroll._apply_widget_scaling
+        cum=[0]; acc=0
+        for path,_ in order:
+            acc+=scale(self._row_h_for(path))
+            cum.append(acc)
+        self._cum_heights=cum
+
+    def _append_cum_height(self,path):
+        """O(1) growth for the common case: a brand-new path always gets
+        the next index, so its row just extends the existing prefix-sum
+        instead of needing a full rebuild — this is what keeps importing
+        a large batch fast."""
+        scale=self._gen_scroll._apply_widget_scaling
+        h=scale(self._row_h_for(path))
+        self._cum_heights.append(self._cum_heights[-1]+h)
+
+    def _reposition_visible_cards(self):
+        """After a rebuild (e.g. expand/collapse), every row from the
+        changed one onward may have shifted — move any card that's
+        currently materialized to its new Y without destroying/rebuilding
+        it, then let _reconcile_visible sort out what should newly be
+        (de)materialized given the shift."""
+        for path,card in self._card_by_path.items():
+            idx=self._path_idx.get(path)
+            if idx is not None and idx+1<len(self._cum_heights):
+                try: tkinter.Place.place(card,y=self._cum_heights[idx])
+                except Exception: pass
 
     def _update_virtual_height(self):
         """Force the canvas's embedded content-window to the full virtual
@@ -847,7 +969,7 @@ class App(DnDCTk):
         placed at the bottom does NOT work here because place()-managed
         children don't propagate their position into the parent frame's
         own requested size the way pack/grid children do."""
-        total=max(len(self._path_idx)*self._scaled_row_h(),1)
+        total=max(self._cum_heights[-1] if self._cum_heights else 0,1)
         canvas=self._gen_scroll._parent_canvas
         win_id=self._gen_scroll._create_window_id
         canvas.itemconfigure(win_id,height=total)
@@ -882,16 +1004,25 @@ class App(DnDCTk):
             top_frac,bot_frac=canvas.yview()
         except Exception:
             return
-        rh=self._scaled_row_h()
-        total_h=total_rows*rh
+        cum=self._cum_heights
+        total_h=cum[-1] if cum else 0
+        if total_h<=0: return
         top_px=top_frac*total_h; bot_px=bot_frac*total_h
-        start=max(int(top_px//rh)-VIRT_BUFFER,0)
-        end=min(int(bot_px//rh)+VIRT_BUFFER,total_rows-1)
+        # bisect finds which row's [cum[i], cum[i+1]) span contains the
+        # pixel offset — works correctly even when rows have different
+        # heights (mixed compact/expanded), unlike a flat division.
+        start=bisect.bisect_right(cum,top_px)-1-VIRT_BUFFER
+        end=bisect.bisect_right(cum,bot_px)-1+VIRT_BUFFER
+        start=max(start,0); end=min(end,total_rows-1)
         want={p for p,i in self._path_idx.items() if start<=i<=end}
-        # Drop cards that scrolled out of range
+        # Drop cards that scrolled out of range — but first read back
+        # anything the user hand-edited in its text boxes, or that edit
+        # is lost the moment the widget is destroyed (this was the actual
+        # cause of edits reverting after a long scroll).
         for p in list(self._card_by_path.keys()):
             if p not in want:
                 c=self._card_by_path.pop(p)
+                self._sync_card_edits(p,c)
                 try: c.destroy()
                 except: pass
         # Build cards that scrolled into range
@@ -901,14 +1032,16 @@ class App(DnDCTk):
 
     def _place_card_for(self,path):
         """Create (or recreate) the card widget for a path already present
-        in self._all_paths/_results, at its fixed row position (idx is
-        stable — tracked in _path_idx — so re-rendering one card, e.g. on
-        expand/collapse, never shifts anything else)."""
+        in self._all_paths/_results, at its position from the real
+        per-row cumulative-height table (not a flat idx*row_height), so
+        an individually-expanded card's row is exactly as tall as that
+        card actually is — nothing above or below it can overlap."""
         if self._gen_empty_lbl.winfo_viewable():
             self._gen_empty_lbl.place_forget()
         idx=self._path_idx.get(path)
         if idx is None:
             idx=len(self._path_idx); self._path_idx[path]=idx
+            self._append_cum_height(path)
         # Large batches default to compact cards (no Textboxes/copy-paste
         # buttons) so each materialized widget is also as cheap as
         # possible — virtualization bounds HOW MANY are alive at once,
@@ -920,26 +1053,50 @@ class App(DnDCTk):
             request_thumb=self._request_thumb,expanded=expanded,
             on_toggle_expand=(lambda p=path:self._toggle_expand(p)) if compact_default else None,
             show_desc=getattr(self,'_show_desc_mode',True))
-        sx=card._apply_widget_scaling(4); sy=idx*self._scaled_row_h()
+        sx=card._apply_widget_scaling(4)
+        sy=self._cum_heights[idx] if idx+1<len(self._cum_heights) else self._cum_heights[-1]
         tkinter.Place.place(card,x=sx,y=sy,relwidth=1,width=-8)
         self._card_by_path[path]=card
         return card
 
+    def _sync_card_edits(self,path,card):
+        """Read back whatever's currently in a card's editable text boxes
+        (title/description/keywords, or prompt) into self._results, so a
+        manual hand-edit survives the card widget itself being destroyed
+        — whether that's from scrolling it out of the virtualized view or
+        from collapsing/expanding it. Only touches those specific text
+        fields, not the card's whole result snapshot — that snapshot's
+        other fields (status, model_used) are frozen at card-build time
+        and would clobber a live update (e.g. a concurrent regenerate)
+        if merged wholesale."""
+        boxes=getattr(card,"_boxes",None)
+        if not boxes or path not in self._results:
+            return
+        for key,box in boxes.items():
+            try:
+                self._results[path][key]=box.get("1.0","end-1c")
+            except Exception:
+                pass
+
     def _toggle_expand(self,path):
         """Swap one card between compact and fully-editable, in place, at
-        its existing row position — doesn't touch any other card. Note:
-        the row height used for scroll math is a fixed estimate per batch
-        (compact vs expanded), so a single card expanded inside an
-        otherwise-compact batch can end up visually a bit taller than the
-        row slot reserved for it — a cosmetic overlap, not a functional
-        bug."""
+        its existing row position. Its own row now grows/shrinks to its
+        real height (see _row_h_for), so every row after it shifts down
+        or up accordingly — every currently-visible card is repositioned
+        to its new spot rather than left where it was, which is what
+        actually prevents the overlap this used to cause."""
         if path in self._expanded_paths: self._expanded_paths.discard(path)
         else: self._expanded_paths.add(path)
         old=self._card_by_path.pop(path,None)
         if old:
+            self._sync_card_edits(path,old)
             try: old.destroy()
             except: pass
+        self._rebuild_cum_heights()
         self._place_card_for(path)
+        self._reposition_visible_cards()
+        self._update_virtual_height()
+        self._reconcile_visible()
 
     def _update_progress(self,done=None,total=None,msg=None):
         t=total or len(self._all_paths)
@@ -986,6 +1143,7 @@ class App(DnDCTk):
             try: c.destroy()
             except: pass
         self._card_by_path={}; self._path_idx={}; self._expanded_paths=set()
+        self._cum_heights=[0]
         self._update_virtual_height()
         try: self._gen_scroll._parent_canvas.yview_moveto(0.0)
         except Exception: pass
@@ -1082,21 +1240,22 @@ class App(DnDCTk):
         suffix_title=self.ai_suffix_text_var.get().strip() if self.ai_suffix_on_var.get() else ""
         concurrency=max(1,min(10,int(self.ai_concurrency_var.get())))
 
+        content_type=self.ai_content_type_var.get()
+        content_phrase=CONTENT_SUFFIXES.get(content_type,"")
+
         if mode=="meta":
             tc=int(self.ai_title_var.get() or 130)
             dc=int(self.ai_desc_var.get() or 200)
             kn=min(int(self.ai_kw_var.get() or 49),49)
             include_desc=self.ai_include_desc_var.get()
             prompt=build_meta_prompt(tc,dc,kn,custom,single_kw,themes,prefix,suffix_title,
-                                      avoid_copyright,include_desc)
+                                      avoid_copyright,include_desc,content_phrase)
         else:
             mw=int(self.ai_words_var.get() or 60)
             prompt=build_prompt_prompt(mw,list(self._style_vars.keys()),custom)
 
         total=len(targets); done_count=0
-        worker_sem=threading.Semaphore(concurrency)
         lock=threading.Lock()
-        remaining=[total]; finished=threading.Event()
 
         def process_one(path,i):
             nonlocal done_count
@@ -1130,7 +1289,7 @@ class App(DnDCTk):
                             if not title.lower().endswith(suffix_title.lower()):
                                 title=title+" "+suffix_title
                         # Trim to char limit
-                        if len(title)>tc: title=title[:tc].rsplit(" ",1)[0].strip()
+                        if len(title)>tc: title=smart_trim(title,tc,must_include=content_phrase or None)
                         if single_kw: kw=enforce_single_keywords(kw)
                         if avoid_copyright: kw=_strip_copyright_keywords(kw)
                         # HARD CAP the keyword count in code — the prompt asks
@@ -1185,19 +1344,14 @@ class App(DnDCTk):
                     self.after(0,lambda p=path:self._update_card(p))
                 self.after(0,lambda n=done_count,t=total:
                     self._update_progress(done=n,total=t))
-            finally:
-                worker_sem.release()
-                with lock:
-                    remaining[0]-=1
-                    if remaining[0]==0: finished.set()
+            except Exception:
+                # Safety net only — process_one already catches its own
+                # per-item errors above and records them as a "failed"
+                # result, so this should never actually fire.
+                pass
 
-        for i,path in enumerate(targets):
-            if self.ai_stop_flag: break
-            worker_sem.acquire()
-            threading.Thread(target=process_one,args=(path,i),daemon=True).start()
-
-        finished.wait(timeout=3600)
-        self.after(0,self._gen_done)
+        self._task_mgr.run_batch(targets, process_one, max_workers=concurrency,
+            on_all_done=lambda: self.after(0,self._gen_done))
 
     def _gen_done(self):
         self.ai_running=False; self._ai_paused=False
@@ -1249,6 +1403,39 @@ class App(DnDCTk):
         self._pause_btn.pack(side="left",padx=(0,4),before=self._gen_btn)
         self._stop_btn.pack(side="left",padx=(0,5),before=self._gen_btn)
         threading.Thread(target=self._gen_thread,args=([path],),daemon=True).start()
+
+    def _save_now(self):
+        """Manual save: read back any hand-edited text from every card
+        that's currently materialized (not just the one on screen), then
+        write straight to the working CSV — the same file auto-save/
+        Export CSV use — so edits are captured whether or not the person
+        has ever explicitly exported yet."""
+        for p,c in list(self._card_by_path.items()):
+            self._sync_card_edits(p,c)
+        done=[p for p in self._all_paths if self._results.get(p,{}).get("status")=="done"]
+        if not done:
+            messagebox.showinfo("Nothing to Save","No generated results yet.")
+            return
+        out_path=getattr(self,"_last_csv_path",None)
+        if not out_path:
+            folder_name=os.path.basename(self._source_folder) if self._source_folder else "export"
+            out_path=os.path.join(self._source_folder or ".",f"#{folder_name}.csv")
+        try:
+            mode=self.current_mode
+            fields=["Filename","Title","Description","Keywords"] if mode=="meta" else ["Filename","Prompt"]
+            def row_for(p):
+                fn=os.path.basename(p); r=self._results.get(p,{})
+                if mode=="meta":
+                    return {"Filename":fn,"Title":r.get("title",""),
+                            "Description":r.get("desc",""),"Keywords":r.get("kw","")}
+                return {"Filename":fn,"Prompt":r.get("prompt","")}
+            with open(out_path,'w',newline='',encoding='utf-8-sig') as f:
+                w=csv.DictWriter(f,fieldnames=fields); w.writeheader()
+                w.writerows(row_for(p) for p in done)
+            self._last_csv_path=out_path
+            self.set_status(f"✓  Saved — {len(done)} rows → {os.path.basename(out_path)}",GRN)
+        except Exception as e:
+            messagebox.showerror("Save Error",str(e))
 
     def _export_csv(self):
         done=[p for p in self._all_paths if self._results.get(p,{}).get("status")=="done"]
