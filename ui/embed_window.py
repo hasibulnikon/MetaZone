@@ -23,8 +23,12 @@ class EmbedWindow(ctk.CTkToplevel):
         self.match_only_var=BooleanVar(value=True); self.subfolder_var=BooleanVar(value=True)
         self.rm_prog_var=BooleanVar(value=True); self.rm_copy_var=BooleanVar(value=True)
         self._build()
-        # Widened to fit the right-hand Activity Log panel
-        self._center(1180,640)
+        # Widened to fit the right-hand Activity Log panel. Height matches
+        # the form's natural content height (~546px measured) plus a small
+        # margin — it used to be hardcoded to 640px, which left a dead gap
+        # below the Start Embedding button.
+        self._center(1180,570)
+        self.minsize(900,560)
         self.protocol("WM_DELETE_WINDOW",self.destroy)
         # Auto-load whatever was just generated, so "generate then embed" is
         # a one-click flow instead of re-browsing for the CSV and folder.
