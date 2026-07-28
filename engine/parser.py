@@ -93,6 +93,59 @@ def parse_meta(text):
     return title.strip(), desc.strip(), kw.strip()
 
 
+def smart_trim(text, max_len, must_include=None):
+    """Trim text to max_len without leaving it mid-sentence. Prefers cutting
+    at the last sentence-ending punctuation (. ! ?) within the limit; if
+    none exists there, falls back to the last complete word, then strips
+    any trailing comma/conjunction/dash so it doesn't read as if it were
+    cut off mid-thought. Used as a last-resort safety net — the prompt
+    itself already asks the model to finish its sentence within the
+    requested length, so this should rarely have to trim much.
+
+    If must_include is given (e.g. "isolated on a transparent background"
+    for a content-type directive), the result is guaranteed to still
+    contain it: trimming shrinks the rest of the sentence further to make
+    room, rather than risk the mandatory phrase itself getting cut off,
+    and it gets appended if the model left it out entirely but there's
+    still room for it.
+    """
+    def _has(s):
+        return must_include and must_include.lower() in s.lower()
+
+    def _base_trim(s, limit):
+        if len(s) <= limit:
+            return s
+        window = s[:limit]
+        best_end = -1
+        for punct in (".", "!", "?"):
+            idx = window.rfind(punct)
+            if idx > best_end:
+                best_end = idx
+        if best_end >= limit * 0.5:
+            return window[:best_end + 1].strip()
+        trimmed = window.rsplit(" ", 1)[0].strip()
+        trimmed = trimmed.rstrip(",;:-–— ")
+        for conj in (" and", " or", " with", " in", " on", " at", " of", " a", " the"):
+            if trimmed.lower().endswith(conj):
+                trimmed = trimmed[:-len(conj)].rstrip(",;:-–— ")
+        return trimmed + "."
+
+    result = _base_trim(text, max_len)
+
+    if must_include and not _has(result):
+        addition = must_include[0].upper() + must_include[1:]
+        suffix = f", {addition}."
+        budget = max_len - len(suffix)
+        if budget > 15:
+            shorter = _base_trim(text, budget).rstrip(". ")
+            candidate = shorter + suffix
+            if len(candidate) <= max_len:
+                return candidate
+        # Not enough room to safely add it without further mangling the
+        # sentence — better to return the clean trim than force it in.
+    return result
+
+
 def enforce_single_keywords(kw_string):
     raw = [k.strip() for k in kw_string.split(",") if k.strip()]
     seen = set(); result = []
