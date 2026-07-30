@@ -1,7 +1,7 @@
 """Reusable result-list widgets: the bulk-import progress dialog and
 the per-file metadata result card (thumbnail, title/description/
 keywords, status, regenerate)."""
-import os, threading
+import os, threading, tkinter
 import customtkinter as ctk
 from core.utils import make_thumb, format_filesize
 from ui.theme import (BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
@@ -398,4 +398,220 @@ class MetaResultCard(ctk.CTkFrame):
         if img:
             self.after(0,lambda:(self._tlbl.configure(image=img,text=""),
                 setattr(self._tlbl,"_image",img)))
+
+
+class ModernDropdown(ctk.CTkFrame):
+    """A CTkComboBox replacement with a fully custom-styled popup.
+
+    CTk's built-in dropdown is a raw tkinter.Menu under the hood — on
+    Windows that delegates its outer border/chrome to the native OS menu
+    renderer, which can't be recolored through any CTk color option (this
+    is a real Tk limitation, not a missed setting). This widget instead
+    opens a borderless Toplevel (no native chrome at all) containing a
+    CTkFrame we draw ourselves, so the whole popup — background, border,
+    corner radius, hover color — actually matches the rest of the app.
+
+    Same variable/set()/command surface as CTkComboBox in readonly mode,
+    so it's a drop-in replacement anywhere that used one that way.
+    """
+    def __init__(self,master,variable,values,command=None,
+                 fg_color=None,text_color=None,border_color=None,
+                 accent_color=None,dropdown_fg_color=None,
+                 dropdown_hover_color=None,dropdown_text_color=None,
+                 font=None,height=36,corner_radius=8,**kw):
+        super().__init__(master,fg_color=fg_color,corner_radius=corner_radius,
+            border_width=2,border_color=border_color,height=height,**kw)
+        self.grid_propagate(False)
+        self.variable=variable; self.values=values; self.command=command
+        self._popup=None
+        self._accent=accent_color or text_color
+        self._dropdown_fg=dropdown_fg_color or fg_color
+        self._dropdown_hover=dropdown_hover_color
+        self._dropdown_text=dropdown_text_color or text_color
+        self._font=font
+        self.grid_columnconfigure(0,weight=1)
+
+        self._label=ctk.CTkLabel(self,text=variable.get(),anchor="w",
+            font=font,text_color=text_color,fg_color="transparent")
+        self._label.grid(row=0,column=0,sticky="ew",padx=(12,4))
+        self._arrow=ctk.CTkLabel(self,text="▾",font=font,
+            text_color=text_color,fg_color="transparent",width=16)
+        self._arrow.grid(row=0,column=1,sticky="e",padx=(0,10))
+        for w in (self,self._label,self._arrow):
+            w.bind("<Button-1>",self._toggle)
+            w.configure(cursor="hand2")
+
+    def set(self,value):
+        self.variable.set(value)
+        self._label.configure(text=value)
+
+    def _toggle(self,_e=None):
+        if self._popup is not None and self._popup.winfo_exists():
+            self._close()
+        else:
+            self._open()
+
+    def _open(self):
+        self.update_idletasks()
+        x=self.winfo_rootx(); y=self.winfo_rooty()+self.winfo_height()+2
+        w=self.winfo_width()
+        row_h=32; pad=6
+        popup_h=min(len(self.values)*row_h+pad*2,320)
+        top=tkinter.Toplevel(self)
+        top.overrideredirect(True)
+        try: top.attributes("-topmost",True)
+        except Exception: pass
+        top.geometry(f"{w}x{popup_h}+{x}+{y}")
+        frame=ctk.CTkFrame(top,fg_color=self._dropdown_fg,corner_radius=8,
+            border_width=1,border_color=self._accent)
+        frame.pack(fill="both",expand=True)
+        holder=frame
+        if len(self.values)*row_h>popup_h-pad*2:
+            holder=ctk.CTkScrollableFrame(frame,fg_color="transparent",
+                scrollbar_button_color=self._dropdown_fg)
+            holder.pack(fill="both",expand=True,padx=2,pady=2)
+        for val in self.values:
+            row=ctk.CTkButton(holder,text=val,anchor="w",height=row_h-2,
+                font=self._font,fg_color="transparent",
+                hover_color=self._dropdown_hover,text_color=self._dropdown_text,
+                corner_radius=6,command=lambda v=val:self._select(v))
+            row.pack(fill="x",padx=4,pady=1)
+        top.bind("<FocusOut>",lambda e:self._close())
+        top.focus_force()
+        self._popup=top
+
+    def _select(self,value):
+        self.set(value)
+        self._close()
+        if self.command:
+            self.command(value)
+
+    def _close(self):
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.destroy()
+        self._popup=None
+
+
+class CompactEditCard(ctk.CTkFrame):
+    """The user-facing "Compact View" card — distinct from MetaResultCard's
+    internal large-batch performance-compact mode (which is read-only by
+    design). This one is genuinely editable: small thumbnail, small
+    title/description/keywords textboxes with live character/keyword
+    counters, and an icon-only Regenerate button — no bordered info box,
+    no full status chrome, nothing beyond what's needed to scan and
+    lightly edit a page of results quickly.
+
+    Exposes the same _boxes / get_result() surface as MetaResultCard, so
+    the app's existing edit-sync logic (_sync_card_edits) works on this
+    card unchanged."""
+    def __init__(self,master,path,result,on_redo,mode="meta",
+                 show_desc=True,request_thumb=None,**kw):
+        super().__init__(master,fg_color=BG3,corner_radius=8,
+            border_width=1,border_color=GLASS_BDR,**kw)
+        self.path=path; self.result=dict(result); self.mode=mode
+        self.show_desc=show_desc
+        self._boxes={}; self._counter_lbls={}
+        self._build(on_redo,request_thumb)
+
+    def _build(self,on_redo,request_thumb):
+        self.grid_columnconfigure(0,weight=1)
+        top=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
+        top.grid(row=0,column=0,sticky="ew",padx=8,pady=(8,4))
+        top.grid_columnconfigure(1,weight=1)
+
+        tf=ctk.CTkFrame(top,fg_color=BG4,corner_radius=6,width=36,height=36)
+        tf.grid(row=0,column=0,rowspan=2,padx=(0,6)); tf.grid_propagate(False)
+        self._tlbl=ctk.CTkLabel(tf,text="🖼",font=ctk.CTkFont("Segoe UI",14),
+            fg_color=BG4,text_color=TXT3,width=34,height=34,corner_radius=6)
+        self._tlbl.pack()
+        if request_thumb:
+            request_thumb(self.path,self._tlbl,size=(34,34))
+
+        fname=os.path.basename(self.path)
+        ctk.CTkLabel(top,text=(fname[:22]+"…") if len(fname)>22 else fname,
+            font=ctk.CTkFont("Segoe UI",9),text_color=TXT3,
+            fg_color="transparent",anchor="w"
+        ).grid(row=0,column=1,rowspan=2,sticky="w")
+
+        self._redo_btn=ctk.CTkButton(top,text="⟳",width=26,height=26,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG4,hover_color=AMB_DIM,text_color=AMB_BTN,
+            corner_radius=6,command=on_redo)
+        self._redo_btn.grid(row=0,column=2,rowspan=2,padx=(4,0))
+
+        if self.mode=="prompt":
+            self._build_field(1,"prompt","Prompt",self.result.get("prompt",""),CYAN,70)
+        else:
+            self._build_field(1,"title","Title",self.result.get("title",""),CYAN,46)
+            nxt=2
+            if self.show_desc:
+                self._build_field(2,"desc","Description",self.result.get("desc",""),TXT2,46)
+                nxt=3
+            self._build_field(nxt,"kw","Keywords",self.result.get("kw",""),GRN,46)
+
+        self._refresh_status()
+
+    def _build_field(self,row,key,label,value,color,height):
+        wrap=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
+        wrap.grid(row=row,column=0,sticky="ew",padx=8,pady=(0,4))
+        wrap.grid_columnconfigure(0,weight=1)
+        hdr=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
+        hdr.grid(row=0,column=0,sticky="ew")
+        hdr.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(hdr,text=label,font=ctk.CTkFont("Segoe UI",8,"bold"),
+            text_color=TXT3,fg_color="transparent").grid(row=0,column=0,sticky="w")
+        counter=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont("Segoe UI",8),
+            text_color=TXT3,fg_color="transparent")
+        counter.grid(row=0,column=1,sticky="e")
+        self._counter_lbls[key]=counter
+
+        box=ctk.CTkTextbox(wrap,height=height,font=ctk.CTkFont("Segoe UI",10),
+            fg_color=BG4,text_color=color,border_color=GLASS_BDR,border_width=1,
+            corner_radius=6,wrap="word")
+        box.grid(row=1,column=0,sticky="ew")
+        box.insert("1.0",value)
+        self._boxes[key]=box
+        self._update_counter(key)
+        box.bind("<KeyRelease>",lambda e,k=key:self._update_counter(k))
+
+    def _update_counter(self,key):
+        box=self._boxes.get(key); lbl=self._counter_lbls.get(key)
+        if not box or not lbl: return
+        text=box.get("1.0","end-1c")
+        if key=="kw":
+            n=len([k for k in text.split(",") if k.strip()])
+            lbl.configure(text=f"{n} kw")
+        else:
+            lbl.configure(text=f"{len(text)} ch")
+
+    def _refresh_status(self):
+        st=self.result.get("status","")
+        color={"done":GRN,"failed":RED_BTN,"waiting":TXT3,"working":AMB_BTN}.get(st,TXT3)
+        try: self.configure(border_color=color if st in ("done","failed","working") else GLASS_BDR)
+        except Exception: pass
+
+    def apply_result(self,result):
+        """Update this card IN PLACE with a new result dict — same
+        purpose as MetaResultCard.apply_result: avoids destroying/
+        recreating the card on every generation, redo, or retry."""
+        self.result=dict(result)
+        keys=("prompt",) if self.mode=="prompt" else \
+             (("title","desc","kw") if self.show_desc else ("title","kw"))
+        for key in keys:
+            box=self._boxes.get(key)
+            if box:
+                box.delete("1.0","end")
+                val=self.result.get(key,"")
+                if val: box.insert("1.0",val)
+                self._update_counter(key)
+        self._refresh_status()
+
+    def set_waiting(self):
+        self.result={"status":"waiting"}
+        self._refresh_status()
+
+    def get_result(self):
+        for k,b in self._boxes.items():
+            self.result[k]=b.get("1.0","end-1c")
+        return self.result
 
