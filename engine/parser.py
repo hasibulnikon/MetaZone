@@ -93,6 +93,32 @@ def parse_meta(text):
     return title.strip(), desc.strip(), kw.strip()
 
 
+import re
+
+
+def sanitize_text_punctuation(text):
+    """Strip punctuation several stock platforms reject outright (quotes,
+    colons, semicolons, exclamation/question marks, parentheses,
+    ampersands, etc.) from a title or description. Comma, period, and
+    hyphen are still allowed — those are the only punctuation marks
+    permitted."""
+    if not text:
+        return text
+    cleaned=re.sub(r"[^A-Za-z0-9\s,.\-]","",text)
+    return re.sub(r"\s+"," ",cleaned).strip()
+
+
+def sanitize_keywords_punctuation(kw_string):
+    """Keywords are stricter than title/description: no punctuation at
+    all, not even a hyphen — only letters, digits, spaces, and the
+    commas that separate one keyword from the next."""
+    if not kw_string:
+        return kw_string
+    cleaned=re.sub(r"[^A-Za-z0-9\s,]","",kw_string)
+    parts=[re.sub(r"\s+"," ",p).strip() for p in cleaned.split(",")]
+    return ", ".join(p for p in parts if p)
+
+
 def smart_trim(text, max_len, must_include=None):
     """Trim text to max_len without leaving it mid-sentence. Prefers cutting
     at the last sentence-ending punctuation (. ! ?) within the limit; if
@@ -144,6 +170,37 @@ def smart_trim(text, max_len, must_include=None):
         # Not enough room to safely add it without further mangling the
         # sentence — better to return the clean trim than force it in.
     return result
+
+
+def dedupe_content_phrase(title, content_phrase):
+    """If the mandatory content-type phrase (e.g. "a vector illustration")
+    got stated twice — a common model habit is to mention it naturally
+    mid-title AND then also tack it on again as a closing summary clause
+    like "..., A vector illustration." — strip the redundant trailing
+    restatement. Only touches an exact trailing repeat; leaves the title
+    alone if the phrase only appears once, or if it doesn't clearly
+    recognize the pattern (safer to leave a possible duplicate than to
+    risk mangling a title that isn't actually duplicated)."""
+    if not content_phrase or not title:
+        return title
+    core=content_phrase.strip().lstrip("aA ").strip()
+    if not core:
+        return title
+    lower=title.lower()
+    core_lower=core.lower()
+    occurrences=lower.count(core_lower)
+    if occurrences < 2:
+        return title
+    # Does the title END with a short clause that's basically just this
+    # phrase restated (with optional leading "a"/"A" and trailing period)?
+    stripped=title.rstrip(". ").rstrip()
+    for lead in ("a ", "A ", "an ", "An ", ""):
+        tail=lead+core
+        if stripped.lower().endswith(tail.lower()):
+            without_tail=stripped[:-len(tail)].rstrip(" ,.-–—")
+            if without_tail and without_tail.lower().count(core_lower) >= 1:
+                return without_tail.rstrip(".") + "."
+    return title
 
 
 def enforce_single_keywords(kw_string):
