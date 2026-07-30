@@ -13,14 +13,14 @@ from core.config import load_prefs, save_prefs
 from core.utils import find_exiftool, check_online, make_thumb, model_label
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
-from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim
+from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_BTN_H,AMB_DIM,
     CYAN,ABSOLUTE_BG,VIRT_BUFFER)
 from ui.dnd import DnDCTk, DND_AVAILABLE, DND_FILES
 from ui.api_dialog import APIManagerWindow
 from ui.embed_window import EmbedWindow
-from ui.widgets import ImportProgressDialog, MetaResultCard
+from ui.widgets import ImportProgressDialog, MetaResultCard, ModernDropdown, CompactEditCard
 from workers.task_manager import TaskManager
 
 class App(DnDCTk):
@@ -47,6 +47,15 @@ class App(DnDCTk):
         # estimate, which is what let an individually-expanded card inside an
         # otherwise-compact batch overlap the row below it.
         self._cum_heights=[0]
+        # View Settings -- Compact View and/or >1 columns switch the
+        # results area from the tested virtualized infinite-scroll to a
+        # simpler paginated grid (see _use_paged_grid/_render_page below).
+        # Expanded + 1 column (the default) keeps using the existing,
+        # already-hardened virtualized scroll untouched.
+        self.view_mode_var=StringVar(value=self.prefs.get("view_mode","expanded"))
+        self.grid_cols_var=IntVar(value=self.prefs.get("grid_cols",1))
+        self.page_size_var=IntVar(value=self.prefs.get("page_size",50))
+        self._current_page=0
 
         # AI settings
         self.ai_title_var    =StringVar(value=str(self.prefs.get("title_len",130)))
@@ -64,9 +73,6 @@ class App(DnDCTk):
         self.ai_prefix_text_var=StringVar(value=self.prefs.get("prefix_text",""))
         self.ai_suffix_text_var=StringVar(value=self.prefs.get("suffix_text",""))
         self.ai_content_type_var=StringVar(value=self.prefs.get("content_type","Auto Detect"))
-        self._style_vars={}
-        for s in ["Videos"]:
-            self._style_vars[s]=BooleanVar(value=False)
 
         self._build_ui()
         self._center(1300,900)
@@ -165,7 +171,7 @@ class App(DnDCTk):
         # mode is currently active, not something to click. Embed opens
         # the Embed window, styled to visually pair with it: dark/gray +
         # white text here, green + black text there (matching the
-        # Generate/API Configuration button look).
+        # Generate/Configuration button look).
         ctk.CTkButton(mid,text="Metadata AI",width=112,height=30,
             font=ctk.CTkFont("Segoe UI",11,"bold"),
             fg_color=BG4,hover_color=BG4,text_color=TXT,
@@ -191,6 +197,15 @@ class App(DnDCTk):
         ctk.CTkLabel(cr,text="© HASIBNIKON",font=ctk.CTkFont("Segoe UI",13,"bold"),
             text_color=TXT,fg_color=BG2).pack(anchor="e")
 
+    def _toggle_sidebar(self):
+        self._sb_collapsed=not self._sb_collapsed
+        if self._sb_collapsed:
+            self._sb_frame.grid_remove()
+            self._sb_expand_btn.place(relx=0.0,rely=0.5,anchor="w")
+        else:
+            self._sb_frame.grid()
+            self._sb_expand_btn.place_forget()
+
     def _build_content(self):
         content=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
         content.grid(row=1,column=0,sticky="nsew")
@@ -208,6 +223,21 @@ class App(DnDCTk):
         self._build_sidebar()
         self._build_main()
 
+        # Collapsible control panel — collapsing frees the whole window
+        # for cards during a big generation run instead of losing 268px
+        # to settings you're not touching mid-batch.
+        self._sb_collapsed=False
+        self._sb_collapse_btn=ctk.CTkButton(self._sb_frame,text="⟨",width=18,height=64,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            corner_radius=0,command=self._toggle_sidebar)
+        self._sb_collapse_btn.place(relx=1.0,rely=0.5,anchor="e")
+        self._sb_expand_btn=ctk.CTkButton(self._main,text="⟩",width=18,height=64,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            corner_radius=0,command=self._toggle_sidebar)
+        # Not placed yet — only shown once the sidebar is actually collapsed.
+
     # ── SIDEBAR ────────────────────────────────────────────────────
     def _build_sidebar(self):
         sb=self._sb_frame; sb.grid_rowconfigure(1,weight=1); sb.grid_columnconfigure(0,weight=1)
@@ -220,7 +250,7 @@ class App(DnDCTk):
         self._sb=inner
 
         # API config
-        ctk.CTkButton(inner,text="🔑  API Configuration",
+        ctk.CTkButton(inner,text="🔑  Configuration",
             font=ctk.CTkFont("Segoe UI",12,"bold"),
             fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
             height=38,corner_radius=8,command=self._open_api_mgr
@@ -274,13 +304,12 @@ class App(DnDCTk):
         plat_row.pack(fill="x",padx=10,pady=(0,6)); plat_row.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(plat_row,text="Platform",font=ctk.CTkFont("Segoe UI",11),
             text_color=TXT2,fg_color=BG2).grid(row=0,column=0,sticky="w")
-        self._plat_combo=ctk.CTkComboBox(msf,variable=self.ai_platform_var,
-            values=list(PLATFORM_RULES.keys()),state="readonly",
+        self._plat_combo=ModernDropdown(msf,variable=self.ai_platform_var,
+            values=list(PLATFORM_RULES.keys()),
             font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG3,text_color=GRN,border_color=GRN_DIM,border_width=2,
-            button_color=GRN,button_hover_color=GRN_H,
-            dropdown_fg_color=BG4,dropdown_text_color=TXT,dropdown_hover_color=GRN_DIM,
-            dropdown_font=ctk.CTkFont("Segoe UI",11),
+            fg_color=BG3,text_color=GRN,border_color=GRN_DIM,
+            accent_color=GRN,dropdown_fg_color=BG4,dropdown_text_color=TXT,
+            dropdown_hover_color=GRN_DIM,
             corner_radius=8,height=36,command=self._on_platform_change)
         self._plat_combo.pack(fill="x",padx=10,pady=(0,8))
         self._plat_combo.bind("<MouseWheel>",self._on_platform_scroll)
@@ -296,13 +325,12 @@ class App(DnDCTk):
         ftype_row.pack(fill="x",padx=10,pady=(0,6)); ftype_row.grid_columnconfigure(0,weight=1)
         ctk.CTkLabel(ftype_row,text="File Type",font=ctk.CTkFont("Segoe UI",11),
             text_color=TXT2,fg_color=BG2).grid(row=0,column=0,sticky="w")
-        self._ftype_combo=ctk.CTkComboBox(msf,variable=self.ai_content_type_var,
-            values=list(CONTENT_SUFFIXES.keys()),state="readonly",
+        self._ftype_combo=ModernDropdown(msf,variable=self.ai_content_type_var,
+            values=list(CONTENT_SUFFIXES.keys()),
             font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG3,text_color=CYAN,border_color=GLASS_BDR,border_width=2,
-            button_color=CYAN,button_hover_color=GRN_H,
-            dropdown_fg_color=BG4,dropdown_text_color=TXT,dropdown_hover_color=GRN_DIM,
-            dropdown_font=ctk.CTkFont("Segoe UI",11),
+            fg_color=BG3,text_color=GRN,border_color=GLASS_BDR,
+            accent_color=GRN,dropdown_fg_color=BG4,dropdown_text_color=TXT,
+            dropdown_hover_color=GRN_DIM,
             corner_radius=8,height=36,command=lambda _=None:self._save_settings())
         self._ftype_combo.pack(fill="x",padx=10,pady=(0,8))
 
@@ -332,6 +360,10 @@ class App(DnDCTk):
             self._desc_sl.configure(state="disabled")
 
         self._kw_sl   =self._slider(msf,"Keywords Count",self.ai_kw_var,5,49,int(self.ai_kw_var.get()))
+        # Lock the title/description ceilings to whatever platform was
+        # already saved — otherwise the cap only takes effect the first
+        # time the person touches the Platform dropdown, not on startup.
+        self._on_platform_change(self.ai_platform_var.get())
 
         # Single Word Keywords now lives inside Advanced Options (see below)
 
@@ -373,21 +405,6 @@ class App(DnDCTk):
         self._adv_btn.pack(fill="x",padx=10,pady=(0,4))
 
         ab=self._adv_body; ab.grid_columnconfigure(0,weight=1)
-
-        # Content themes inside advanced
-        ctk.CTkLabel(ab,text="CONTENT THEMES",font=ctk.CTkFont("Segoe UI",9,"bold"),
-            text_color=TXT3,fg_color=BG2).pack(anchor="w",padx=12,pady=(8,2))
-        for s in ["Videos"]:
-            rf2=ctk.CTkFrame(ab,fg_color=BG2,corner_radius=0)
-            rf2.pack(fill="x",padx=10,pady=1); rf2.grid_columnconfigure(0,weight=1)
-            ctk.CTkLabel(rf2,text=s,font=ctk.CTkFont("Segoe UI",11),
-                text_color=TXT2,fg_color=BG2).grid(row=0,column=0,sticky="w")
-            ctk.CTkSwitch(rf2,text="",variable=self._style_vars[s],
-                progress_color=GRN,button_color=TXT,fg_color=GLASS_BDR,
-                onvalue=True,offvalue=False,width=46,height=24
-            ).grid(row=0,column=1,sticky="e")
-
-        ctk.CTkFrame(ab,fg_color=GLASS_BDR,height=1,corner_radius=0).pack(fill="x",padx=8,pady=6)
 
         # Prefix / Suffix — entry appears directly under its own toggle
         ctk.CTkLabel(ab,text="TITLE PREFIX / SUFFIX",font=ctk.CTkFont("Segoe UI",9,"bold"),
@@ -461,12 +478,13 @@ class App(DnDCTk):
         self._clear_results()
         for p in list(self._all_paths):
             self._results[p]={"status":"waiting"}
-            idx=self._path_idx.get(p)
-            if idx is None:
-                idx=len(self._path_idx); self._path_idx[p]=idx
-        self._rebuild_cum_heights()
-        self._update_virtual_height()
-        self._reconcile_visible()
+        if self._use_paged_grid():
+            self._render_page()
+        else:
+            self._path_idx={p:i for i,p in enumerate(self._all_paths)}
+            self._rebuild_cum_heights()
+            self._update_virtual_height()
+            self._reconcile_visible()
 
     def _on_platform_scroll(self,event,direction=None):
         plats=list(PLATFORM_RULES.keys())
@@ -482,8 +500,20 @@ class App(DnDCTk):
     def _on_platform_change(self,val):
         rules=PLATFORM_RULES.get(val,{})
         kw_val=min(rules.get("kw",49),49)
-        for var,sl,v in [(self.ai_title_var,self._title_sl,rules.get("title",130)),
-                         (self.ai_desc_var,self._desc_sl,rules.get("desc",200)),
+        title_max=rules.get("title",300)
+        desc_max=rules.get("desc",500)
+        # Lock each slider's ceiling to this platform's real recommended
+        # max — the whole point is that once Adobe Stock (200) is picked,
+        # you CANNOT drag or type above 200 until you switch platforms;
+        # you can still go lower if you want a shorter title.
+        self._title_sl.configure(to=title_max,number_of_steps=title_max-self._title_sl._from)
+        self._title_sl._to=title_max
+        self._desc_sl.configure(to=desc_max,number_of_steps=desc_max-self._desc_sl._from)
+        self._desc_sl._to=desc_max
+        title_val=min(int(self.ai_title_var.get() or title_max),title_max)
+        desc_val=min(int(self.ai_desc_var.get() or desc_max),desc_max)
+        for var,sl,v in [(self.ai_title_var,self._title_sl,title_val),
+                         (self.ai_desc_var,self._desc_sl,desc_val),
                          (self.ai_kw_var,self._kw_sl,kw_val)]:
             var.set(str(v)); sl.set(v)
             lbl=getattr(sl,"_value_label",None)
@@ -499,7 +529,6 @@ class App(DnDCTk):
             lbl=getattr(sl,"_value_label",None)
             if lbl: lbl.configure(text=str(val))
         self._custom_box.delete("1.0","end"); self.ai_custom_var.set("")
-        for v in self._style_vars.values(): v.set(False)
         self._save_settings()
 
     def _div(self,parent):
@@ -524,11 +553,18 @@ class App(DnDCTk):
             progress_color=GRN,fg_color=BG3,button_color=TXT,
             button_hover_color="#ddffdd",height=14)
         sl.set(init); sl.pack(fill="x",pady=(3,0)); sl._value_label=vl
+        # Mutable range bounds — a platform's own recommended max can
+        # tighten sl._to afterward (see _on_platform_change), without
+        # needing to rebuild the widget. sl._from stays fixed; only the
+        # ceiling is ever platform-locked.
+        sl._from=from_; sl._to=to
         def _upd(v): iv=int(v); var.set(str(iv)); vl.configure(text=str(iv)); self._save_settings()
         sl.configure(command=_upd)
 
         # Click the number to type an exact value — Enter (or losing focus)
-        # snaps the slider to it, clamped to this slider's own range.
+        # snaps the slider to it, clamped to this slider's OWN CURRENT
+        # range (sl._from/sl._to, which a platform lock may have tightened
+        # since this closure was created — not the original from_/to).
         def _start_edit(_e=None):
             cur=vl.cget("text")
             vl.grid_remove()
@@ -540,7 +576,7 @@ class App(DnDCTk):
                 txt=ent.get().strip()
                 try: iv=int(txt)
                 except ValueError: iv=int(var.get() or init)
-                iv=max(from_,min(to,iv))
+                iv=max(sl._from,min(sl._to,iv))
                 ent.destroy(); vl.grid()
                 sl.set(iv); _upd(iv)
             def _cancel(_e=None):
@@ -564,6 +600,9 @@ class App(DnDCTk):
             "suffix_text":self.ai_suffix_text_var.get(),
             "include_desc":self.ai_include_desc_var.get(),
             "content_type":self.ai_content_type_var.get(),
+            "view_mode":self.view_mode_var.get(),
+            "grid_cols":int(self.grid_cols_var.get() or 1),
+            "page_size":int(self.page_size_var.get() or 50),
         })
         save_prefs(self.prefs)
 
@@ -707,6 +746,46 @@ class App(DnDCTk):
         self._gen_count_lbl=ctk.CTkLabel(gen_hdr,text="Generated Metadata (0)",
             font=ctk.CTkFont("Segoe UI",12,"bold"),text_color=TXT,fg_color="transparent")
         self._gen_count_lbl.grid(row=0,column=0,sticky="w")
+
+        vs=ctk.CTkFrame(gen_hdr,fg_color="transparent",corner_radius=0)
+        vs.grid(row=0,column=1,sticky="e")
+        self._view_expanded_btn=ctk.CTkButton(vs,text="Expanded",width=76,height=26,
+            font=ctk.CTkFont("Segoe UI",10,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=6,
+            command=lambda:self._set_view_mode("expanded"))
+        self._view_expanded_btn.pack(side="left",padx=(0,2))
+        self._view_compact_btn=ctk.CTkButton(vs,text="Compact",width=76,height=26,
+            font=ctk.CTkFont("Segoe UI",10,"bold"),
+            fg_color="transparent",hover_color=BG3,text_color=TXT3,corner_radius=6,
+            command=lambda:self._set_view_mode("compact"))
+        self._view_compact_btn.pack(side="left",padx=(0,10))
+        ctk.CTkLabel(vs,text="Cols:",font=ctk.CTkFont("Segoe UI",10),
+            text_color=TXT3,fg_color="transparent").pack(side="left",padx=(0,4))
+        self._col_btns={}
+        for n in (1,2,3,4):
+            b=ctk.CTkButton(vs,text=str(n),width=26,height=26,
+                font=ctk.CTkFont("Segoe UI",10,"bold"),
+                fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
+                command=lambda n=n:self._set_grid_cols(n))
+            b.pack(side="left",padx=1)
+            self._col_btns[n]=b
+        self._page_nav=ctk.CTkFrame(vs,fg_color="transparent",corner_radius=0)
+        self._page_nav.pack(side="left",padx=(10,0))
+        self._page_prev_btn=ctk.CTkButton(self._page_nav,text="◀",width=26,height=26,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
+            command=lambda:self._go_page(-1))
+        self._page_prev_btn.pack(side="left",padx=1)
+        self._page_lbl=ctk.CTkLabel(self._page_nav,text="Page 1/1",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT2,fg_color="transparent",width=64)
+        self._page_lbl.pack(side="left",padx=4)
+        self._page_next_btn=ctk.CTkButton(self._page_nav,text="▶",width=26,height=26,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
+            command=lambda:self._go_page(1))
+        self._page_next_btn.pack(side="left",padx=1)
+        self._page_nav.pack_forget()  # only shown once paged-grid mode is active
+        self._refresh_view_settings_ui()
 
         self._gen_scroll=ctk.CTkScrollableFrame(gen,fg_color="transparent",
             scrollbar_button_color=BG3,scrollbar_button_hover_color=BG4,corner_radius=0)
@@ -855,6 +934,7 @@ class App(DnDCTk):
             for p in new: self._make_blank_card(p)
             self._gen_btn.configure(text=f"✨  Generate ({len(self._all_paths)})")
             self._update_progress()
+            if self._use_paged_grid(): self._render_page()
         self._update_dropzone_visibility()
 
     def _import_with_progress(self,paths):
@@ -878,16 +958,144 @@ class App(DnDCTk):
                 self._gen_btn.configure(text=f"✨  Generate ({len(self._all_paths)})")
                 self._update_progress()
                 self._update_dropzone_visibility()
+                if self._use_paged_grid(): self._render_page()
                 dlg.finish()
         self.after(10,add_batch)
 
+    def _render_page(self):
+        """Paged-grid renderer used for Compact View and/or >1 columns.
+        Builds the current page's cards as plain grid children — no
+        virtualization needed here, since a page is always bounded by
+        page_size (default 50), so building all of them at once is cheap
+        regardless of how many files are loaded overall."""
+        for p,c in list(self._card_by_path.items()):
+            self._sync_card_edits(p,c)
+            try: c.destroy()
+            except: pass
+        self._card_by_path={}
+        for child in list(self._gen_scroll.winfo_children()):
+            if child is not self._gen_empty_lbl:
+                try: child.destroy()
+                except: pass
+
+        total=len(self._all_paths)
+        if total==0:
+            self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
+            self._page_lbl.configure(text="Page 1/1")
+            return
+        self._gen_empty_lbl.place_forget()
+
+        size=max(int(self.page_size_var.get() or 50),1)
+        n_pages=max((total+size-1)//size,1)
+        self._current_page=max(0,min(self._current_page,n_pages-1))
+        start=self._current_page*size
+        end=min(start+size,total)
+        page_paths=self._all_paths[start:end]
+
+        cols=max(1,min(int(self.grid_cols_var.get() or 1),4))
+        for c in range(cols):
+            self._gen_scroll.grid_columnconfigure(c,weight=1)
+
+        compact=self.view_mode_var.get()=="compact"
+        show_desc=getattr(self,'_show_desc_mode',True)
+        for i,path in enumerate(page_paths):
+            result=self._results.get(path,{"status":"waiting"})
+            if compact:
+                card=CompactEditCard(self._gen_scroll,path,result,
+                    on_redo=lambda p=path:self._redo_single(p),mode=self.current_mode,
+                    show_desc=show_desc,request_thumb=self._request_thumb)
+            else:
+                card=MetaResultCard(self._gen_scroll,path,result,
+                    on_redo=lambda p=path:self._redo_single(p),mode=self.current_mode,
+                    request_thumb=self._request_thumb,expanded=True,
+                    on_toggle_expand=None,show_desc=show_desc)
+            card.grid(row=i//cols,column=i%cols,sticky="new",padx=4,pady=4)
+            self._card_by_path[path]=card
+
+        self._page_lbl.configure(text=f"Page {self._current_page+1}/{n_pages}")
+
+    def _go_page(self,delta):
+        self._current_page+=delta
+        self._render_page()
+
+    def _set_view_mode(self,mode):
+        self.view_mode_var.set(mode)
+        self._current_page=0
+        self._save_settings()
+        self._apply_view_mode_change()
+
+    def _set_grid_cols(self,n):
+        self.grid_cols_var.set(n)
+        self._current_page=0
+        self._save_settings()
+        self._apply_view_mode_change()
+
+    def _apply_view_mode_change(self):
+        """Switch the results area between the virtualized infinite-scroll
+        (expanded + 1 column) and the paginated grid (Compact View, or
+        >1 columns) — whichever the current View Settings call for."""
+        # Sync + clear whatever's currently shown, regardless of which
+        # system built it, before switching.
+        for p,c in list(self._card_by_path.items()):
+            self._sync_card_edits(p,c)
+            try: c.destroy()
+            except: pass
+        self._card_by_path={}
+        for child in list(self._gen_scroll.winfo_children()):
+            if child is not self._gen_empty_lbl:
+                try: child.destroy()
+                except: pass
+
+        if self._use_paged_grid():
+            self._render_page()
+        else:
+            # Coming from paged-grid mode (or fresh), _path_idx/_cum_heights
+            # may be empty or stale — rebuild them from _all_paths so the
+            # virtualized scroll has correct bookkeeping to work from.
+            self._path_idx={p:i for i,p in enumerate(self._all_paths)}
+            self._rebuild_cum_heights()
+            self._update_virtual_height()
+            if not self._all_paths:
+                self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
+            self._reconcile_visible()
+        self._refresh_view_settings_ui()
+
+    def _refresh_view_settings_ui(self):
+        expanded=self.view_mode_var.get()!="compact"
+        self._view_expanded_btn.configure(
+            fg_color=GRN if expanded else "transparent",
+            text_color=ABSOLUTE_BG if expanded else TXT3)
+        self._view_compact_btn.configure(
+            fg_color="transparent" if expanded else GRN,
+            text_color=TXT3 if expanded else ABSOLUTE_BG)
+        cur_cols=int(self.grid_cols_var.get() or 1)
+        for n,b in self._col_btns.items():
+            b.configure(fg_color=GRN if n==cur_cols else BG3,
+                        text_color=ABSOLUTE_BG if n==cur_cols else TXT2)
+        if self._use_paged_grid():
+            self._page_nav.pack(side="left",padx=(10,0))
+        else:
+            self._page_nav.pack_forget()
+
+    def _use_paged_grid(self):
+        """Compact View, or more than 1 column, uses the simpler paginated
+        grid renderer instead of the virtualized infinite-scroll — see
+        _render_page(). Expanded + 1 column (the default) keeps using the
+        existing, already-hardened virtualization untouched."""
+        return self.view_mode_var.get()=="compact" or int(self.grid_cols_var.get() or 1)>1
+
     def _make_blank_card(self,path):
-        """Add path to the queue and register it right away — metadata is
-        filled in only once Generate is pressed. Does NOT necessarily
-        create a widget: with virtualization, only paths near the visible
-        viewport get a real card; _reconcile_visible() decides that."""
+        """Add path to the queue. In the default (expanded, 1 column)
+        view this also registers it with the virtualized scroll system —
+        only paths near the visible viewport get a real widget,
+        _reconcile_visible() decides that. In paged-grid mode, cards are
+        built per-page on demand by _render_page() instead, so there's
+        nothing to do here beyond recording the path."""
         self._all_paths.append(path)
         self._results[path]={"status":"waiting"}
+        if self._use_paged_grid():
+            self._update_desc_toggle_lock()
+            return None
         idx=self._path_idx.get(path)
         if idx is None:
             idx=len(self._path_idx); self._path_idx[path]=idx
@@ -1131,6 +1339,7 @@ class App(DnDCTk):
         if confirm and self._all_paths:
             if not messagebox.askyesno("Clear","Remove all files and results?"): return
         self._all_paths.clear(); self._results.clear(); self._source_folder=""
+        self._last_csv_path=None
         self._gen_epoch+=1
         self._clear_results()
         self._update_desc_toggle_lock()
@@ -1144,11 +1353,14 @@ class App(DnDCTk):
             except: pass
         self._card_by_path={}; self._path_idx={}; self._expanded_paths=set()
         self._cum_heights=[0]
+        self._current_page=0
         self._update_virtual_height()
         try: self._gen_scroll._parent_canvas.yview_moveto(0.0)
         except Exception: pass
         self._gen_count_lbl.configure(text="Generated Metadata (0)")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
+        if self._use_paged_grid():
+            self._page_lbl.configure(text="Page 1/1")
 
     def _update_card(self,path):
         """Refresh this path's card IF it's currently materialized.
@@ -1216,7 +1428,7 @@ class App(DnDCTk):
         if self.ai_running: messagebox.showwarning("Busy","Already generating."); return
         if not self._all_paths: messagebox.showerror("No Images","Add images first."); return
         if not get_active_keys(self.prefs):
-            messagebox.showerror("No API Keys","Open 'API Configuration'."); return
+            messagebox.showerror("No API Keys","Open 'Configuration'."); return
         self.ai_running=True; self.ai_stop_flag=False; self._ai_paused=False
         self._gen_epoch+=1; epoch=self._gen_epoch
         self._gen_btn.configure(state="disabled",text="⟳  Generating…")
@@ -1234,7 +1446,7 @@ class App(DnDCTk):
         custom=self.ai_custom_var.get()
         single_kw=self.ai_single_kw_var.get()
         avoid_copyright=self.ai_avoid_copy_var.get()
-        themes=", ".join(s for s,v in self._style_vars.items() if v.get())
+        themes=""  # Content Themes section removed per request — nothing to build here
         # Only apply prefix/suffix if their toggles are ON
         prefix=self.ai_prefix_text_var.get().strip() if self.ai_prefix_on_var.get() else ""
         suffix_title=self.ai_suffix_text_var.get().strip() if self.ai_suffix_on_var.get() else ""
@@ -1252,7 +1464,8 @@ class App(DnDCTk):
                                       avoid_copyright,include_desc,content_phrase)
         else:
             mw=int(self.ai_words_var.get() or 60)
-            prompt=build_prompt_prompt(mw,list(self._style_vars.keys()),custom)
+            styles=[content_phrase] if content_phrase else []
+            prompt=build_prompt_prompt(mw,styles,custom)
 
         total=len(targets); done_count=0
         lock=threading.Lock()
@@ -1280,6 +1493,23 @@ class App(DnDCTk):
                                (f" ({key_idx})" if key_idx else "")
                     if mode=="meta":
                         title,desc,kw=parse_meta(raw)
+                        if not include_desc:
+                            # The prompt doesn't ask for a description field
+                            # at all in this mode, but a model can still
+                            # sometimes emit an extra line (occasionally a
+                            # second batch of keywords) that gets parsed
+                            # into "desc" — force it empty regardless of
+                            # what came back, so this can never leak
+                            # through no matter how a given model behaves.
+                            desc=""
+                        # Several stock platforms reject certain punctuation
+                        # outright — strip it here rather than trust the
+                        # model to have never used it. Title/description may
+                        # still use comma, period, hyphen; keywords allow no
+                        # punctuation at all, not even a hyphen.
+                        title=sanitize_text_punctuation(title)
+                        if desc: desc=sanitize_text_punctuation(desc)
+                        kw=sanitize_keywords_punctuation(kw)
                         # Apply prefix ONCE — check it's not already there
                         if prefix:
                             if not title.lower().startswith(prefix.lower()):
@@ -1288,6 +1518,8 @@ class App(DnDCTk):
                         if suffix_title:
                             if not title.lower().endswith(suffix_title.lower()):
                                 title=title+" "+suffix_title
+                        if content_phrase:
+                            title=dedupe_content_phrase(title,content_phrase)
                         # Trim to char limit
                         if len(title)>tc: title=smart_trim(title,tc,must_include=content_phrase or None)
                         if single_kw: kw=enforce_single_keywords(kw)
@@ -1318,6 +1550,7 @@ class App(DnDCTk):
                                 raw2,_,_,_=call_with_failover(path,retry_prompt,self.prefs,
                                     status_cb=lambda msg:None)
                                 _,_,kw2=parse_meta(raw2)
+                                kw2=sanitize_keywords_punctuation(kw2)
                                 if single_kw: kw2=enforce_single_keywords(kw2)
                                 if avoid_copyright: kw2=_strip_copyright_keywords(kw2)
                                 kw2_list=[k.strip() for k in kw2.split(",") if k.strip()]
@@ -1372,13 +1605,37 @@ class App(DnDCTk):
         # Auto-save CSV
         if done>0: self._auto_save_csv()
 
+    def _resolve_csv_path(self):
+        """Path to write this session's CSV to. Once self._last_csv_path is
+        set, every subsequent save in this session reuses that exact file
+        (repeated Save/auto-save on the same batch always updates the same
+        CSV, never creates a new one). The first time in a fresh session
+        (no _last_csv_path yet — e.g. right after Clear All), if the
+        default #foldername.csv already exists on disk from an earlier
+        batch/session on this same folder, don't silently overwrite it —
+        pick the next available numbered variant instead: '#foldername
+        (1).csv', then '(2)', etc."""
+        existing=getattr(self,"_last_csv_path",None)
+        if existing:
+            return existing
+        folder=self._source_folder or "."
+        folder_name=os.path.basename(self._source_folder) if self._source_folder else "export"
+        base=os.path.join(folder,f"#{folder_name}.csv")
+        if not os.path.exists(base):
+            return base
+        n=1
+        while True:
+            candidate=os.path.join(folder,f"#{folder_name} ({n}).csv")
+            if not os.path.exists(candidate):
+                return candidate
+            n+=1
+
     def _auto_save_csv(self):
         """Save CSV silently to the source folder with #foldername naming."""
         try:
             done_paths=[p for p in self._all_paths if self._results.get(p,{}).get("status")=="done"]
             if not done_paths: return
-            folder_name=os.path.basename(self._source_folder) if self._source_folder else "export"
-            out_path=os.path.join(self._source_folder,f"#{folder_name}.csv")
+            out_path=self._resolve_csv_path()
             mode=self.current_mode
             fields=["Filename","Title","Description","Keywords"] if mode=="meta" else ["Filename","Prompt"]
             def row_for(p):
@@ -1391,7 +1648,7 @@ class App(DnDCTk):
                 w=csv.DictWriter(f,fieldnames=fields); w.writeheader()
                 w.writerows(row_for(p) for p in done_paths)
             self._last_csv_path=out_path
-            self.set_status(f"✓  Auto-saved → #{folder_name}.csv",GRN)
+            self.set_status(f"✓  Auto-saved → {os.path.basename(out_path)}",GRN)
         except Exception: pass
 
     def _redo_single(self,path):
@@ -1416,10 +1673,7 @@ class App(DnDCTk):
         if not done:
             messagebox.showinfo("Nothing to Save","No generated results yet.")
             return
-        out_path=getattr(self,"_last_csv_path",None)
-        if not out_path:
-            folder_name=os.path.basename(self._source_folder) if self._source_folder else "export"
-            out_path=os.path.join(self._source_folder or ".",f"#{folder_name}.csv")
+        out_path=self._resolve_csv_path()
         try:
             mode=self.current_mode
             fields=["Filename","Title","Description","Keywords"] if mode=="meta" else ["Filename","Prompt"]
@@ -1440,9 +1694,9 @@ class App(DnDCTk):
     def _export_csv(self):
         done=[p for p in self._all_paths if self._results.get(p,{}).get("status")=="done"]
         if not done: messagebox.showinfo("No Results","No generated results yet."); return
-        folder_name=os.path.basename(self._source_folder) if self._source_folder else "export"
+        suggested=os.path.basename(self._resolve_csv_path())
         path=filedialog.asksaveasfilename(defaultextension=".csv",
-            filetypes=[("CSV","*.csv")],initialfile=f"#{folder_name}.csv")
+            filetypes=[("CSV","*.csv")],initialfile=suggested)
         if not path: return
         try:
             mode=self.current_mode
