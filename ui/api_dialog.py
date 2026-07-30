@@ -1,20 +1,22 @@
-"""API Key Manager popup — per-provider tabs, multiple keys, activate/
-deactivate, live key validation."""
+"""Configuration popup — API Keys and Theme, as two pages behind a page
+selector at the top."""
 import threading
 import customtkinter as ctk
 from tkinter import messagebox, StringVar
-from core.constants import AI_PROVIDERS, VISIBLE_PROVIDERS
+from core.constants import (AI_PROVIDERS, VISIBLE_PROVIDERS,
+    THEME_BG_PRESETS, THEME_ACCENT_PRESETS)
 from core.config import save_prefs
-from core.utils import model_label, model_id_from_label
+from core.utils import model_label, model_id_from_label, relaunch_app
 from engine.ai_providers import validate_key
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS_BDR,GLASS_BDR_AC,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_DIM,AMB_BTN,ABSOLUTE_BG)
 
 class APIManagerWindow(ctk.CTkToplevel):
     def __init__(self,parent,prefs,on_close=None):
-        super().__init__(parent); self.title("API Configuration")
+        super().__init__(parent); self.title("Configuration")
         self.configure(fg_color=BG1); self.resizable(False,False); self.grab_set()
         self.prefs=prefs; self.on_close=on_close; self._cur=VISIBLE_PROVIDERS[0]
+        self._page="keys"
         self._build(); self._center(920,620)
         self.protocol("WM_DELETE_WINDOW",self._done)
 
@@ -29,18 +31,33 @@ class APIManagerWindow(ctk.CTkToplevel):
         return p+(f" ●{n}" if n else "")
 
     def _build(self):
-        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(2,weight=1)
+        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(3,weight=1)
         hdr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
         hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
         hdr.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(hdr,text="API Configuration",
+        ctk.CTkLabel(hdr,text="Configuration",
             font=ctk.CTkFont("Segoe UI",15,"bold"),text_color=TXT,fg_color=BG2
         ).grid(row=0,column=0,sticky="w",padx=18,pady=14)
         ctk.CTkButton(hdr,text="✕",width=34,height=34,fg_color="transparent",
             hover_color=RED_DIM,text_color=TXT3,corner_radius=6,command=self._done
         ).grid(row=0,column=1,padx=10)
+
+        page_bar=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=44)
+        page_bar.grid(row=1,column=0,sticky="ew"); page_bar.grid_propagate(False)
+        self._page_keys_btn=ctk.CTkButton(page_bar,text="API Keys",width=120,height=30,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
+            command=lambda:self._switch_page("keys"))
+        self._page_keys_btn.pack(side="left",padx=(14,4),pady=7)
+        self._page_theme_btn=ctk.CTkButton(page_bar,text="Theme",width=120,height=30,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color="transparent",hover_color=BG3,text_color=TXT3,corner_radius=8,
+            command=lambda:self._switch_page("theme"))
+        self._page_theme_btn.pack(side="left",padx=4,pady=7)
+
         tab_bar=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=50)
-        tab_bar.grid(row=1,column=0,sticky="ew"); tab_bar.grid_propagate(False)
+        tab_bar.grid(row=2,column=0,sticky="ew"); tab_bar.grid_propagate(False)
+        self._keys_tab_bar=tab_bar
         self._tabs={}
         for p in VISIBLE_PROVIDERS:
             btn=ctk.CTkButton(tab_bar,text=self._tab_text(p),width=116,height=34,
@@ -50,22 +67,143 @@ class APIManagerWindow(ctk.CTkToplevel):
                 corner_radius=8,command=lambda pv=p:self._switch(pv))
             btn.pack(side="left",padx=(8 if p==VISIBLE_PROVIDERS[0] else 3,0),pady=8)
             self._tabs[p]=btn
-        body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
-        body.grid(row=2,column=0,sticky="nsew")
-        body.grid_columnconfigure(0,weight=0); body.grid_columnconfigure(1,weight=1)
-        body.grid_rowconfigure(0,weight=1)
-        self._lp=ctk.CTkFrame(body,fg_color=BG2,corner_radius=0,width=420)
+        self._keys_body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
+        self._keys_body.grid(row=3,column=0,sticky="nsew")
+        self._keys_body.grid_columnconfigure(0,weight=0); self._keys_body.grid_columnconfigure(1,weight=1)
+        self._keys_body.grid_rowconfigure(0,weight=1)
+        self._lp=ctk.CTkFrame(self._keys_body,fg_color=BG2,corner_radius=0,width=420)
         self._lp.grid(row=0,column=0,sticky="nsew"); self._lp.grid_propagate(False)
-        self._rp=ctk.CTkFrame(body,fg_color=BG1,corner_radius=0)
+        self._rp=ctk.CTkFrame(self._keys_body,fg_color=BG1,corner_radius=0)
         self._rp.grid(row=0,column=1,sticky="nsew",padx=(1,0))
         self._rp.grid_columnconfigure(0,weight=1); self._rp.grid_rowconfigure(1,weight=1)
+
+        self._theme_body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
+        self._theme_body.grid(row=2,column=0,rowspan=2,sticky="nsew")
+        self._theme_body.grid_remove()  # hidden until Theme page is selected
+        self._build_theme_page()
+
         ftr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
-        ftr.grid(row=3,column=0,sticky="ew"); ftr.grid_propagate(False)
+        ftr.grid(row=4,column=0,sticky="ew"); ftr.grid_propagate(False)
         ctk.CTkButton(ftr,text="Done",width=100,height=34,
             font=ctk.CTkFont("Segoe UI",13,"bold"),
             fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
             command=self._done).pack(side="right",padx=16,pady=9)
         self._render()
+
+    def _switch_page(self,page):
+        self._page=page
+        keys_active=(page=="keys")
+        self._page_keys_btn.configure(fg_color=GRN if keys_active else "transparent",
+            text_color=ABSOLUTE_BG if keys_active else TXT3)
+        self._page_theme_btn.configure(fg_color="transparent" if keys_active else GRN,
+            text_color=TXT3 if keys_active else ABSOLUTE_BG)
+        if keys_active:
+            self._keys_tab_bar.grid(); self._keys_body.grid()
+            self._theme_body.grid_remove()
+        else:
+            self._keys_tab_bar.grid_remove(); self._keys_body.grid_remove()
+            self._theme_body.grid()
+
+    def _build_theme_page(self):
+        from ui.theme import BG1 as _cur_bg1
+        self._staged_bg=self.prefs.get("theme_bg_base") or _cur_bg1
+        self._staged_accent=self.prefs.get("theme_accent_base") or GRN
+
+        wrap=ctk.CTkScrollableFrame(self._theme_body,fg_color=BG1,corner_radius=0)
+        wrap.pack(fill="both",expand=True)
+
+        ctk.CTkLabel(wrap,text="Background Color",font=ctk.CTkFont("Segoe UI",12,"bold"),
+            text_color=TXT,fg_color=BG1).pack(anchor="w",padx=20,pady=(20,2))
+        ctk.CTkLabel(wrap,text="One color — every panel/card shade is generated from it.",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color=BG1
+        ).pack(anchor="w",padx=20,pady=(0,10))
+        bg_row=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
+        bg_row.pack(anchor="w",padx=20,pady=(0,8))
+        self._bg_swatches={}
+        for name,hexval in THEME_BG_PRESETS.items():
+            self._bg_swatches[hexval]=self._make_swatch(bg_row,hexval,
+                lambda h=hexval:self._stage_bg(h))
+        self._bg_hex_var=StringVar(value=self._staged_bg)
+        self._build_hex_row(wrap,self._bg_hex_var,self._stage_bg)
+
+        ctk.CTkFrame(wrap,fg_color=GLASS_BDR,height=1,corner_radius=0).pack(fill="x",padx=20,pady=16)
+
+        ctk.CTkLabel(wrap,text="Accent Color",font=ctk.CTkFont("Segoe UI",12,"bold"),
+            text_color=TXT,fg_color=BG1).pack(anchor="w",padx=20,pady=(0,2))
+        ctk.CTkLabel(wrap,text="Used for buttons, highlights, and active states.",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color=BG1
+        ).pack(anchor="w",padx=20,pady=(0,10))
+        acc_row=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
+        acc_row.pack(anchor="w",padx=20,pady=(0,8))
+        self._accent_swatches={}
+        for name,hexval in THEME_ACCENT_PRESETS.items():
+            self._accent_swatches[hexval]=self._make_swatch(acc_row,hexval,
+                lambda h=hexval:self._stage_accent(h))
+        self._accent_hex_var=StringVar(value=self._staged_accent)
+        self._build_hex_row(wrap,self._accent_hex_var,self._stage_accent)
+
+        self._refresh_swatch_selection()
+
+        note=ctk.CTkLabel(wrap,
+            text="Applying restarts Meta Zone to take effect. If you have\n"
+                 "unsaved files loaded, save or export them first.",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color=BG1,justify="left")
+        note.pack(anchor="w",padx=20,pady=(20,10))
+        ctk.CTkButton(wrap,text="Apply Theme (Restart)",height=40,width=220,
+            font=ctk.CTkFont("Segoe UI",12,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
+            command=self._confirm_apply_theme).pack(anchor="w",padx=20,pady=(0,20))
+
+    def _make_swatch(self,parent,hexval,command):
+        b=ctk.CTkButton(parent,text="",width=34,height=34,corner_radius=17,
+            fg_color=hexval,hover_color=hexval,border_width=2,border_color=BG3,
+            command=command)
+        b.pack(side="left",padx=5)
+        return b
+
+    def _build_hex_row(self,parent,var,on_change):
+        row=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
+        row.pack(anchor="w",padx=20,pady=(4,0))
+        ctk.CTkLabel(row,text="Hex:",font=ctk.CTkFont("Segoe UI",10),
+            text_color=TXT3,fg_color="transparent").pack(side="left",padx=(0,6))
+        ent=ctk.CTkEntry(row,textvariable=var,width=110,height=28,
+            font=ctk.CTkFont("Consolas",11),fg_color=BG3,text_color=TXT,
+            border_color=GLASS_BDR,corner_radius=6)
+        ent.pack(side="left")
+        def _commit(_e=None):
+            v=var.get().strip()
+            if not v.startswith("#"): v="#"+v
+            if len(v) in (4,7):
+                on_change(v)
+            else:
+                messagebox.showwarning("Invalid hex","Use a hex color like #1a1a1a.",parent=self)
+        ent.bind("<Return>",_commit); ent.bind("<FocusOut>",_commit)
+
+    def _stage_bg(self,hexval):
+        self._staged_bg=hexval; self._bg_hex_var.set(hexval)
+        self._refresh_swatch_selection()
+
+    def _stage_accent(self,hexval):
+        self._staged_accent=hexval; self._accent_hex_var.set(hexval)
+        self._refresh_swatch_selection()
+
+    def _refresh_swatch_selection(self):
+        for hexval,btn in self._bg_swatches.items():
+            btn.configure(border_color=GRN if hexval.lower()==self._staged_bg.lower() else BG3)
+        for hexval,btn in self._accent_swatches.items():
+            btn.configure(border_color=GRN if hexval.lower()==self._staged_accent.lower() else BG3)
+
+    def _confirm_apply_theme(self):
+        proceed=messagebox.askyesno("Apply Theme",
+            "Meta Zone needs to restart to apply the new theme.\n\n"
+            "If you have files loaded that you haven't saved or exported "
+            "yet, they'll be lost — save or export first if needed.\n\n"
+            "Restart now?",parent=self)
+        if not proceed: return
+        self.prefs["theme_bg_base"]=self._staged_bg
+        self.prefs["theme_accent_base"]=self._staged_accent
+        save_prefs(self.prefs)
+        relaunch_app()
 
     def _switch(self,p):
         self._cur=p
