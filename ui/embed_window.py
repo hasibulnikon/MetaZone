@@ -1,12 +1,13 @@
 """Embed Metadata tab window — batch-writes CSV metadata into image/
 vector/video files via ExifTool."""
-import os, sys, csv, subprocess, threading
+import os, sys, csv, re, subprocess, threading
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
 from core.utils import find_exiftool, find_file, find_recursive
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,LOG_BG,ABSOLUTE_BG,AMB,AMB2)
 from ui.dnd import DND_AVAILABLE, DND_FILES
+from workers.task_manager import TaskManager
 
 class EmbedWindow(ctk.CTkToplevel):
     def __init__(self,parent,csv_path=None,folder_path=None):
@@ -22,6 +23,12 @@ class EmbedWindow(ctk.CTkToplevel):
         self.col_kw_var=StringVar(value="(skip)"); self.col_desc_var=StringVar(value="(skip)")
         self.match_only_var=BooleanVar(value=True); self.subfolder_var=BooleanVar(value=True)
         self.rm_prog_var=BooleanVar(value=True); self.rm_copy_var=BooleanVar(value=True)
+        # Remove Copyright stays functional (still applied on embed) but is
+        # hidden from the toggle grid for now — Replace Filename takes its
+        # spot in the UI instead.
+        self.replace_filename_var=BooleanVar(value=False)
+        self._task_mgr=TaskManager()
+        self._rename_lock=threading.Lock()
         self._build()
         # Widened to fit the right-hand Activity Log panel. Height matches
         # the form's natural content height (~546px measured) plus a small
@@ -83,6 +90,7 @@ class EmbedWindow(ctk.CTkToplevel):
             font=ctk.CTkFont("Segoe UI",10,"bold"),text_color=TXT3,fg_color=BG3,
             corner_radius=8,padx=8,pady=2)
         self.match_status.grid(row=1,column=2,sticky="e",padx=10,pady=(0,10))
+        self._register_folder_drop([r2,self.folder_status])
 
         # Column map (compact 2x2)
         cmap=ctk.CTkFrame(body,fg_color=GLASS,corner_radius=10,border_width=1,border_color=GLASS_BDR)
@@ -114,7 +122,7 @@ class EmbedWindow(ctk.CTkToplevel):
             ("Match Filename Only",self.match_only_var),
             ("Include Sub-Folders",self.subfolder_var),
             ("Remove Program Name",self.rm_prog_var),
-            ("Remove Copyright",self.rm_copy_var),
+            ("Replace Filename",self.replace_filename_var),
         ]
         for i,(lbl,var) in enumerate(toggles):
             r,c=i//2,i%2
@@ -134,7 +142,8 @@ class EmbedWindow(ctk.CTkToplevel):
         af.grid_columnconfigure(0,weight=1)
         self._emb_btn=ctk.CTkButton(af,text="▶  Start Embedding",height=44,
             font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=22,
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
+            text_color_disabled=ABSOLUTE_BG,corner_radius=22,
             command=self._start)
         self._emb_btn.grid(row=0,column=0,sticky="ew")
         ctk.CTkButton(af,text="↺",width=44,height=44,
@@ -198,7 +207,9 @@ class EmbedWindow(ctk.CTkToplevel):
         except Exception as e: messagebox.showerror("CSV Error",str(e),parent=self)
 
     def _browse_folder(self):
-        p=filedialog.askdirectory(title="Select file location",parent=self)
+        start=self.folder_path_var.get() or None
+        p=filedialog.askdirectory(title="Select file location",parent=self,
+            initialdir=start if start and os.path.isdir(start) else None)
         if p:
             self.folder_path_var.set(p)
             self.folder_status.configure(text=f"✓ {os.path.basename(p)}",
@@ -242,6 +253,33 @@ class EmbedWindow(ctk.CTkToplevel):
                 w.dnd_bind("<<Drop>>",self._on_csv_drop)
             except Exception: pass
 
+    def _register_folder_drop(self,widgets):
+        """Let the File Location row accept a dragged-in folder directly —
+        also accepts a dropped file, in which case its containing folder
+        is used, matching how people naturally drag things in."""
+        if not DND_AVAILABLE: return
+        for w in widgets:
+            try:
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind("<<Drop>>",self._on_folder_drop)
+            except Exception: pass
+
+    def _on_folder_drop(self,event):
+        raw=event.data
+        paths=[p.strip('{}') for p in raw.split('} {')] if '{' in raw else raw.split()
+        paths=[p.strip('{}') for p in paths]
+        if not paths: return event.action
+        p=paths[0]
+        folder=p if os.path.isdir(p) else os.path.dirname(p)
+        if folder and os.path.isdir(folder):
+            self.folder_path_var.set(folder)
+            self.folder_status.configure(text=f"✓ {os.path.basename(folder)}",
+                fg_color=GRN_DIM,text_color=GRN)
+            self._update_match_preview()
+        else:
+            messagebox.showwarning("Not a folder","Drop a folder here.",parent=self)
+        return event.action
+
     def _on_csv_drop(self,event):
         raw=event.data
         paths=[p.strip('{}') for p in raw.split('} {')] if '{' in raw else raw.split()
@@ -268,6 +306,35 @@ class EmbedWindow(ctk.CTkToplevel):
         for cb in self.col_combos.values(): cb.configure(values=["(skip)"]); cb.set("(skip)")
         self._emb_btn.configure(state="normal",text="▶  Start Embedding")
         self._clear_log()
+
+    def _rename_to_title(self,fp,title):
+        """Rename fp to a filesystem-safe name built from the first 8
+        words of title, preserving the original extension. Returns the
+        new path on success, or None (and logs why) if it couldn't.
+        Locked end-to-end (collision check through the actual rename)
+        since this runs from parallel worker threads — two files sharing
+        the same title must never both compute the same free name before
+        either has renamed, or one would silently overwrite the other."""
+        words=title.strip().split()[:8]
+        base=" ".join(words)
+        base=re.sub(r'[<>:"/\\|?*]',"",base).strip()
+        base=re.sub(r"\s+"," ",base)
+        if not base:
+            return None
+        ext=os.path.splitext(fp)[1]
+        directory=os.path.dirname(fp)
+        with self._rename_lock:
+            new_path=os.path.join(directory,base+ext)
+            n=1
+            while os.path.exists(new_path) and os.path.normcase(new_path)!=os.path.normcase(fp):
+                new_path=os.path.join(directory,f"{base} ({n}){ext}")
+                n+=1
+            try:
+                os.rename(fp,new_path)
+                return new_path
+            except Exception as ex:
+                self.after(0,lambda e=str(ex):self._log_msg(f"⚠  Rename failed: {e}"))
+                return None
 
     def _start(self):
         if self.embed_running: return
@@ -298,14 +365,24 @@ class EmbedWindow(ctk.CTkToplevel):
         col_t=self.col_title_var.get(); col_k=self.col_kw_var.get(); col_d=self.col_desc_var.get()
         use_sub=self.subfolder_var.get(); use_ext=self.match_only_var.get()
         rm_prog=self.rm_prog_var.get(); rm_copy=self.rm_copy_var.get()
-        total=len(self.csv_rows); ok=skipped=errors=0
+        replace_fn=self.replace_filename_var.get()
+        total=len(self.csv_rows)
         finder=find_recursive if use_sub else find_file
         self.after(0,lambda:self._log_msg(f"▶  Started — {total} rows"))
-        for i,row in enumerate(self.csv_rows):
+
+        counts={"ok":0,"skipped":0,"errors":0}
+        lock=threading.Lock()
+
+        def process_row(row,i):
             fn=(row.get(col_f) or "").strip()
-            if not fn: skipped+=1; continue
+            if not fn:
+                with lock: counts["skipped"]+=1
+                return
             fp=finder(folder,fn,use_ext)
-            if not fp: skipped+=1; self.after(0,lambda f=fn:self._log_msg(f"⚠  Not found: {f}")); continue
+            if not fp:
+                with lock: counts["skipped"]+=1
+                self.after(0,lambda f=fn:self._log_msg(f"⚠  Not found: {f}"))
+                return
             cmd=[et,'-overwrite_original','-codedcharacterset=UTF8']
             title=(row.get(col_t) or "").strip() if col_t and col_t!="(skip)" else ""
             kw_raw=(row.get(col_k) or "").strip() if col_k and col_k!="(skip)" else ""
@@ -322,15 +399,30 @@ class EmbedWindow(ctk.CTkToplevel):
                 flags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
                 res=subprocess.run(cmd,capture_output=True,text=True,timeout=30,creationflags=flags)
                 actual=os.path.basename(fp)
-                if res.returncode==0: ok+=1; self.after(0,lambda fn=actual:self._log_msg(f"✓  {fn}"))
+                if res.returncode==0:
+                    final_name=actual
+                    if replace_fn and title:
+                        new_path=self._rename_to_title(fp,title)
+                        if new_path: final_name=os.path.basename(new_path)
+                    with lock: counts["ok"]+=1
+                    self.after(0,lambda fn=final_name:self._log_msg(f"✓  {fn}"))
                 else:
-                    errors+=1; err=(res.stderr or res.stdout or "Unknown").strip()
+                    with lock: counts["errors"]+=1
+                    err=(res.stderr or res.stdout or "Unknown").strip()
                     self.after(0,lambda fn=actual,e=err:self._log_msg(f"✗  {fn} — {e}"))
             except Exception as ex:
-                errors+=1; self.after(0,lambda fn=fn,e=str(ex):self._log_msg(f"✗  {fn} — {e}"))
-        summary=f"{ok} embedded · {skipped} not found · {errors} errors"
-        self.after(0,lambda:(self._log_msg(f"● Done — {summary}"),
-            self._emb_btn.configure(state="normal",text="▶  Start Again"),
-            setattr(self,'embed_running',False)))
+                with lock: counts["errors"]+=1
+                self.after(0,lambda fn=fn,e=str(ex):self._log_msg(f"✗  {fn} — {e}"))
+
+        def _finish():
+            summary=f"{counts['ok']} embedded · {counts['skipped']} not found · {counts['errors']} errors"
+            self.after(0,lambda:(self._log_msg(f"● Done — {summary}"),
+                self._emb_btn.configure(state="normal",text="▶  Start Again"),
+                setattr(self,'embed_running',False)))
+
+        # Bounded parallel embedding (exiftool calls are mostly I/O wait,
+        # not CPU-bound) — this is what actually makes a 100+ file batch
+        # fast instead of running one exiftool process at a time.
+        self._task_mgr.run_batch(self.csv_rows,process_row,max_workers=6,on_all_done=_finish)
 
 
