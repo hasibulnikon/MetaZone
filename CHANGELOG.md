@@ -1,5 +1,108 @@
 # Changelog
 
+## v0.3
+
+### Theme customization
+- "API Configuration" renamed to "Configuration", now a two-page window
+  (API Keys / Theme) behind a page selector at the top.
+- New Theme page: pick a background color and an accent color — presets
+  as circular swatches (Pitch Black / Natural Black / Grayish Black for
+  background; Green/Red/Purple/Pink/Violet/Orange/Blue/Teal for accent)
+  plus manual hex input for either. Text color is intentionally not
+  customizable, per request.
+- One background color generates the full BG1-BG4/glass/border shade
+  ladder via a fixed lightness step; one accent color generates its own
+  hover/dim variants — nobody has to pick five shades by hand.
+- Applying shows a confirmation (warns unsaved files will be lost, since
+  it restarts the app) and then closes and relaunches Meta Zone
+  automatically. Verified the actual relaunch mechanism directly: spawned
+  a real subprocess the same way Apply does, confirmed it launches and
+  stays running, and separately confirmed a genuinely fresh process
+  picks up a saved custom theme correctly. Works both from source and as
+  the frozen EXE (uses sys.executable when frozen, since a packaged
+  build has no Python interpreter to hand a script to).
+
+### Compact View + Grid + Pagination
+- New View Settings controls in the results header: Expanded/Compact
+  toggle, 1-4 column buttons, and page navigation.
+- New CompactEditCard: small thumbnail, genuinely editable title/
+  description/keywords boxes with live character/keyword counters,
+  icon-only regenerate button — no bordered info box, no full status
+  chrome.
+- Architecture note: rather than rewrite the virtualized infinite-scroll
+  system (already hardened through several rounds of real bug fixes —
+  overlap, the buried collapse button, the edit-loss bug), Compact View
+  and >1 columns use a separate, simpler paginated grid renderer instead.
+  Expanded + 1 column (the default) keeps using the original,
+  unmodified virtualized scroll — confirmed via regression test that it
+  still works exactly as before.
+- Tested end-to-end: 75-file batch, Compact + 3 columns, confirmed exact
+  page counts (50 + 25), edited a card, navigated away and back,
+  confirmed the edit survived — same edit-loss protection now covers
+  page navigation, not just scrolling. Also confirmed live generation
+  results stream correctly into compact-grid cards in place.
+- View settings persist across restarts.
+
+### Modern dropdown styling
+- CTk's dropdown is a raw tkinter.Menu under the hood — on Windows its
+  border is native OS chrome that can't be recolored through any CTk
+  setting (a real Tk limitation, not a missed option). Built a proper
+  replacement (ModernDropdown) using a borderless custom popup instead,
+  applied to Platform and File Type.
+
+### Collapsible control panel
+- Thin collapse tab on the sidebar's right edge; matching expand tab
+  appears on the card area's left edge once collapsed, freeing the full
+  window width for cards during generation.
+
+### Keyword ordering
+- Strengthened the prompt to explain why keyword order matters (Adobe
+  Stock weights early keywords more heavily in search) and what to
+  prioritize first (main subject/action) vs. later (mood/color/style).
+  Confirmed nothing downstream (single-word enforcement, copyright
+  filtering, dedup) ever re-sorts the list — it's a pure order-
+  preserving filter chain.
+
+### Bug fixes
+- Description/keyword bleed: when Description is off, some files were
+  getting a second batch of keywords parsed into the description field
+  (keywords generated twice under two different labels). Fixed by
+  force-emptying description whenever the toggle is off, regardless of
+  what the model returns.
+- CSV auto-save/Save now use numbered suffixes (#folder.csv, #folder
+  (1).csv, #folder (2).csv, ...) for separate batches from the same
+  folder, instead of silently overwriting a previous export. Verified
+  against the exact 3-batch scenario described.
+- Vector titles double-stating "vector illustration" (once naturally,
+  once as a trailing summary clause) — strengthened the prompt and
+  added a code-side safety net that strips the redundant restatement,
+  freeing character budget for real content.
+- Punctuation restrictions: title/description now strip everything
+  except comma, period, hyphen; keywords strip all punctuation
+  including hyphens.
+- Platform title/description limits now actually lock the slider
+  ceiling — switching to a stricter platform clamps down, but a
+  manually-lowered value survives switching back. Corrected Adobe
+  Stock's cap to 200 (was stored as 150).
+- Embed window's "Processing" button text going invisible — same fix
+  pattern as the Generate button.
+- Embed folder browser now starts from the current folder instead of
+  Documents; added drag-and-drop for the File Location field.
+- Replace Filename toggle (hides Remove Copyright, which stays fully
+  functional) — renames embedded files to the first 8 words of their
+  title. Stress-tested with 30 files sharing an identical title:
+  confirmed unique numbered filenames, zero data loss.
+- Embedding is now parallel (up to 6 at once) instead of one file at a
+  time. Caught and fixed a real race condition this exposed: two files
+  with the same title being renamed simultaneously by different worker
+  threads could have silently overwritten one file with another — fixed
+  with a lock, then stress-tested under real concurrent load to confirm
+  it holds.
+- Removed "Content Theme / Videos" from Advanced Options entirely, and
+  fixed a pre-existing bug this surfaced: Prompt mode was always
+  sending every style name regardless of any toggle state.
+- File Type dropdown color changed from cyan to green.
+
 ## v0.2
 
 ### Manual edits getting lost after scrolling (data loss — found root cause)
