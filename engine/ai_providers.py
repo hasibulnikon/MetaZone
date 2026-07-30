@@ -178,7 +178,7 @@ def call_with_failover(path,prompt,prefs,status_cb=None):
     On failure, immediately move to the next key.
     If all keys fail, raise with the last error."""
     seq=get_active_keys(prefs)
-    if not seq: raise RuntimeError("No active API keys. Open 'API Configuration'.")
+    if not seq: raise RuntimeError("No active API keys. Open 'Configuration'.")
     last_err=""
     for provider,key,model,key_idx in seq:
         try:
