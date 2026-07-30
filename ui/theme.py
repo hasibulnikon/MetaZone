@@ -8,18 +8,86 @@ module split — verified via static analysis that nothing referenced
 those names anywhere in the app; this is the one real palette that was
 already in effect (it was defined a second time later in the old single
 file, silently overriding the dead one).
+
+THEME CUSTOMIZATION: background and accent are user-choosable (see
+Configuration > Theme). Rather than storing every shade separately, the
+person picks ONE background color and ONE accent color; every other
+shade (BG1-BG4/GLASS/borders, accent hover/dim) is derived from those
+two via a fixed lightness step — see generate_bg_ladder/
+generate_accent_variants. This module reads the saved base colors once,
+at import time, and computes the ladder — that's what makes "apply on
+restart" work: a fresh process re-imports this module and gets the new
+values, no live-reactive plumbing needed anywhere else in the app.
 """
 import customtkinter as ctk
+from core.config import load_prefs
 
 def init_ctk_theme():
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("green")
 
-# ── Black Glassmorphic palette ──────────────────────────────────────
-BG1="#0a0a0a"; BG2="#111111"; BG3="#1a1a1a"; BG4="#222222"
-GLASS="#161616"; GLASS_BDR="#2a2a2a"; GLASS_BDR_AC="#00c853"
+
+# ── Color math ───────────────────────────────────────────────────────
+def _hex_to_rgb(h):
+    h=h.lstrip("#")
+    if len(h)==3: h="".join(c*2 for c in h)
+    return tuple(int(h[i:i+2],16) for i in (0,2,4))
+
+def _rgb_to_hex(rgb):
+    r,g,b=(max(0,min(255,int(v))) for v in rgb)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def _lighten(hex_color,amount):
+    r,g,b=_hex_to_rgb(hex_color)
+    return _rgb_to_hex((r+amount,g+amount,b+amount))
+
+def _darken(hex_color,amount):
+    r,g,b=_hex_to_rgb(hex_color)
+    return _rgb_to_hex((r-amount,g-amount,b-amount))
+
+def generate_bg_ladder(base_hex):
+    """One background color -> the full BG1-BG4/GLASS/border ladder,
+    each step a little lighter than the last so panels/cards/borders
+    stay visually distinct while reading as one consistent shade."""
+    return {
+        "BG1":base_hex,
+        "BG2":_lighten(base_hex,7),
+        "BG3":_lighten(base_hex,16),
+        "BG4":_lighten(base_hex,24),
+        "GLASS":_lighten(base_hex,10),
+        "GLASS_BDR":_lighten(base_hex,32),
+    }
+
+def generate_accent_variants(base_hex):
+    """One accent color -> its own hover (lighter, for button hover
+    states) and dim (much darker, for subtle backgrounds behind badges/
+    pills) variants."""
+    return {
+        "ACCENT":base_hex,
+        "ACCENT_H":_lighten(base_hex,24),
+        "ACCENT_DIM":_darken(base_hex,70),
+    }
+
+
+_prefs=load_prefs()
+_bg_base=_prefs.get("theme_bg_base")
+_accent_base=_prefs.get("theme_accent_base")
+
+_bg=generate_bg_ladder(_bg_base) if _bg_base else {
+    "BG1":"#0a0a0a","BG2":"#111111","BG3":"#1a1a1a","BG4":"#222222",
+    "GLASS":"#161616","GLASS_BDR":"#2a2a2a",
+}
+_accent=generate_accent_variants(_accent_base) if _accent_base else {
+    "ACCENT":"#00c853","ACCENT_H":"#00a040","ACCENT_DIM":"#00331a",
+}
+
+# ── Palette — background/accent derived above; text and the semantic
+# status colors (danger/warning) are NOT user-customizable by request,
+# so they stay fixed regardless of theme choice. ──────────────────────
+BG1=_bg["BG1"]; BG2=_bg["BG2"]; BG3=_bg["BG3"]; BG4=_bg["BG4"]
+GLASS=_bg["GLASS"]; GLASS_BDR=_bg["GLASS_BDR"]; GLASS_BDR_AC=_accent["ACCENT"]
 TXT="#f0f0f0"; TXT2="#a0a0a0"; TXT3="#505050"
-GRN="#00c853"; GRN_H="#00a040"; GRN_DIM="#00331a"
+GRN=_accent["ACCENT"]; GRN_H=_accent["ACCENT_H"]; GRN_DIM=_accent["ACCENT_DIM"]
 RED_BTN="#e53935"; RED_BTN_H="#b71c1c"; RED_DIM="#2a0000"
 AMB_BTN="#f9a825"; AMB_BTN_H="#c67c00"; AMB_DIM="#2a1a00"
 CYAN="#00e5ff"; LOG_BG="#050505"; ABSOLUTE_BG="#000000"
