@@ -3,7 +3,7 @@ keyword/title/description rules, supported file extensions. No logic
 here — just data other modules read.
 """
 
-APP_VERSION = "v0.2"  # bump this on each major update: v0.3, v0.4, ...
+APP_VERSION = "v0.3"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
 
 AI_PROVIDERS = {
     "OpenRouter": {
@@ -98,7 +98,7 @@ ALL_SUPPORTED_EXTS = IMAGE_EXTS | VECTOR_EXTS | VIDEO_EXTS
 
 AI_PROVIDERS_ORDERED=["Gemini","Mistral","Groq","OpenAI","Claude","Grok","OpenRouter"]
 
-# Hidden from the API Configuration tabs and skipped during generation
+# Hidden from the Configuration window's API Keys tabs and skipped during generation
 # failover — NOT deleted from AI_PROVIDERS/CALLERS/AI_PROVIDERS_ORDERED, so
 # re-enabling them later (or if their issues get sorted out) is just
 # removing an entry here, nothing structural.
@@ -107,11 +107,29 @@ VISIBLE_PROVIDERS=[p for p in AI_PROVIDERS_ORDERED if p not in HIDDEN_PROVIDERS]
 
 PLATFORM_RULES = {
     "General":      {"kw":49,"title":300,"desc":250},
-    "Adobe Stock":  {"kw":49,"title":150,"desc":250},
+    "Adobe Stock":  {"kw":49,"title":200,"desc":250},
     "Shutterstock": {"kw":50,"title":200,"desc":200},
     "Getty Images": {"kw":50,"title":200,"desc":500},
     "Freepik":      {"kw":30,"title":150,"desc":200},
     "Pond5":        {"kw":50,"title":200,"desc":500},
     "iStock":       {"kw":50,"title":200,"desc":200},
     "Vecteezy":     {"kw":50,"title":200,"desc":200},
+}
+
+# Theme picker presets (see ui/theme.py for how one color becomes the full
+# background ladder / accent hover+dim pair).
+THEME_BG_PRESETS = {
+    "Pitch Black":   "#000000",
+    "Natural Black": "#0a0a0a",
+    "Grayish Black": "#1c1c1c",
+}
+THEME_ACCENT_PRESETS = {
+    "Green":  "#00c853",
+    "Red":    "#e53935",
+    "Purple": "#8e24aa",
+    "Pink":   "#d81b60",
+    "Violet": "#7c4dff",
+    "Orange": "#fb8c00",
+    "Blue":   "#2979ff",
+    "Teal":   "#00bfa5",
 }
