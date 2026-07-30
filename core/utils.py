@@ -2,7 +2,7 @@
 generation, filesize formatting, provider model-id <-> label lookups.
 No AI calls beyond image encoding, no app state.
 """
-import os, sys, base64, socket
+import os, sys, subprocess, base64, socket
 import customtkinter as ctk
 from PIL import Image
 from core.constants import AI_PROVIDERS, VECTOR_EXTS, VIDEO_EXTS
@@ -109,4 +109,23 @@ def format_filesize(path):
             return f"{n:.0f} {unit}" if unit=="B" else f"{n:.1f} {unit}"
         n/=1024
     return f"{n:.1f} TB"
+
+def relaunch_app():
+    """Close this process and start a fresh one. Used after applying a
+    new theme — colors are derived once at ui/theme.py's import time
+    (see that module), so a genuinely fresh process is what makes a new
+    choice actually take effect, not a live-reactive rebuild. Handles
+    both running from source (python app.py) and the packaged frozen
+    EXE — a frozen build has no Python interpreter to hand a script to,
+    so it must re-launch sys.executable directly with no arguments."""
+    try:
+        if getattr(sys,"frozen",False):
+            subprocess.Popen([sys.executable])
+        else:
+            main_mod=sys.modules.get("__main__")
+            main_file=getattr(main_mod,"__file__",None)
+            if main_file:
+                subprocess.Popen([sys.executable,os.path.abspath(main_file)])
+    finally:
+        os._exit(0)
 
