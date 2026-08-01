@@ -302,6 +302,30 @@ class SmartWorkflowPipeline:
         self._save(resume_at="optimization")
 
     # ── Stage 5 ─────────────────────────────────────────────────────
+    def _reorder_keywords_by_relevance(self, title, kw_list):
+        """Spec's Stage 5 calls for checking/fixing 'Keyword ordering' and
+        'Keyword importance' — Stage 4's prompt already asks the AI for
+        most-relevant-first order, but that's a soft instruction with no
+        code-side guarantee. This re-ranks keywords so ones that actually
+        appear in the title (the clearest signal of "this is the central
+        subject") move to the front. It's a STABLE sort, so within each
+        relevance tier the AI's own original relative order is kept —
+        this nudges the most on-topic terms up without discarding the
+        AI's broader ordering, fabricating nothing, and costing no extra
+        API calls."""
+        title_words = set(w for w in title.lower().split() if len(w) > 2)
+        title_lower = title.lower()
+
+        def relevance(kw):
+            kwl = kw.lower()
+            if kwl in title_lower:
+                return 2  # the whole keyword phrase is in the title
+            if any(w in title_words for w in kwl.split()):
+                return 1  # at least one word of it is
+            return 0
+
+        return sorted(kw_list, key=relevance, reverse=True)
+
     def _stage_optimize(self):
         self._emit_stage("optimization")
         app = self.app
@@ -312,6 +336,10 @@ class SmartWorkflowPipeline:
             score = 100
             title, desc, kw = r.get("title", ""), r.get("desc", ""), r.get("kw", "")
             kw_list = [k.strip() for k in kw.split(",") if k.strip()]
+            if title and kw_list:
+                kw_list = self._reorder_keywords_by_relevance(title, kw_list)
+                r["kw"] = ", ".join(kw_list)
+                kw = r["kw"]
             if not title:
                 score -= 30
             if not kw_list:
