@@ -3,7 +3,7 @@ vector/video files via ExifTool."""
 import os, sys, csv, re, subprocess, threading
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
-from core.utils import find_exiftool, find_file, find_recursive
+from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,LOG_BG,ABSOLUTE_BG,AMB,AMB2)
 from ui.dnd import DND_AVAILABLE, DND_FILES
@@ -150,6 +150,22 @@ class EmbedWindow(ctk.CTkToplevel):
             font=ctk.CTkFont("Segoe UI",18,"bold"),fg_color=RED_DIM,hover_color=RED_BTN_H,
             text_color=RED_BTN,corner_radius=22,command=self._reset
         ).grid(row=0,column=1,padx=(6,0))
+
+        # Progress bar + live succeeded/failed/not-found counts — same
+        # pattern as the Generate tab's progress row, so embedding a large
+        # batch is no longer a silent multi-second wait with no feedback.
+        prog=ctk.CTkFrame(body,fg_color=GLASS,corner_radius=10,
+            border_width=1,border_color=GLASS_BDR)
+        prog.grid(row=5,column=0,sticky="ew",pady=(0,4))
+        prog.grid_columnconfigure(0,weight=1)
+        self._embed_prog_bar=ctk.CTkProgressBar(prog,progress_color=GRN,fg_color=BG3,
+            height=6,corner_radius=3)
+        self._embed_prog_bar.grid(row=0,column=0,sticky="ew",padx=10,pady=(10,4))
+        self._embed_prog_bar.set(0)
+        self._embed_counts_lbl=ctk.CTkLabel(prog,
+            text="0 succeeded  ·  0 failed  ·  0 not found",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color="transparent")
+        self._embed_counts_lbl.grid(row=1,column=0,sticky="w",padx=10,pady=(0,10))
 
         # Activity Log — right-hand panel (matches the old v1.2 layout)
         log_panel=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0)
@@ -305,6 +321,8 @@ class EmbedWindow(ctk.CTkToplevel):
         self.match_status.configure(text="",fg_color=BG3,text_color=TXT3)
         for cb in self.col_combos.values(): cb.configure(values=["(skip)"]); cb.set("(skip)")
         self._emb_btn.configure(state="normal",text="▶  Start Embedding")
+        self._embed_prog_bar.set(0)
+        self._embed_counts_lbl.configure(text="0 succeeded  ·  0 failed  ·  0 not found")
         self._clear_log()
 
     def _rename_to_title(self,fp,title):
@@ -369,54 +387,51 @@ class EmbedWindow(ctk.CTkToplevel):
         total=len(self.csv_rows)
         finder=find_recursive if use_sub else find_file
         self.after(0,lambda:self._log_msg(f"▶  Started — {total} rows"))
+        self.after(0,lambda:(self._embed_prog_bar.set(0),
+            self._embed_counts_lbl.configure(text=f"0 succeeded  ·  0 failed  ·  0 not found")))
 
         counts={"ok":0,"skipped":0,"errors":0}
         lock=threading.Lock()
+        done=[0]
+
+        def _update_progress_ui():
+            pct=done[0]/total if total else 0
+            self._embed_prog_bar.set(pct)
+            self._embed_counts_lbl.configure(
+                text=f"{counts['ok']} succeeded  ·  {counts['errors']} failed  ·  "
+                     f"{counts['skipped']} not found  ({done[0]}/{total})")
 
         def process_row(row,i):
             fn=(row.get(col_f) or "").strip()
             if not fn:
-                with lock: counts["skipped"]+=1
+                with lock: counts["skipped"]+=1; done[0]+=1
+                self.after(0,_update_progress_ui)
                 return
             fp=finder(folder,fn,use_ext)
             if not fp:
-                with lock: counts["skipped"]+=1
-                self.after(0,lambda f=fn:self._log_msg(f"⚠  Not found: {f}"))
+                with lock: counts["skipped"]+=1; done[0]+=1
+                self.after(0,lambda f=fn:(self._log_msg(f"⚠  Not found: {f}"),_update_progress_ui()))
                 return
-            cmd=[et,'-overwrite_original','-codedcharacterset=UTF8']
             title=(row.get(col_t) or "").strip() if col_t and col_t!="(skip)" else ""
             kw_raw=(row.get(col_k) or "").strip() if col_k and col_k!="(skip)" else ""
             desc=(row.get(col_d) or "").strip() if col_d and col_d!="(skip)" else ""
-            if title: cmd+=[f'-Title={title}',f'-ObjectName={title}',f'-Headline={title}']
-            if kw_raw:
-                for kw in [k.strip() for k in kw_raw.replace(';',',').split(',') if k.strip()]:
-                    cmd+=[f'-Keywords={kw}',f'-Subject={kw}']
-            if desc: cmd+=[f'-Description={desc}',f'-Caption-Abstract={desc}']
-            if rm_prog: cmd+=['-Software=','-CreatorTool=','-HistorySoftwareAgent=']
-            if rm_copy: cmd+=['-Rights=','-Copyright=','-CopyrightNotice=','-Creator=']
-            cmd.append(fp)
-            try:
-                flags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
-                res=subprocess.run(cmd,capture_output=True,text=True,timeout=30,creationflags=flags)
-                actual=os.path.basename(fp)
-                if res.returncode==0:
-                    final_name=actual
-                    if replace_fn and title:
-                        new_path=self._rename_to_title(fp,title)
-                        if new_path: final_name=os.path.basename(new_path)
-                    with lock: counts["ok"]+=1
-                    self.after(0,lambda fn=final_name:self._log_msg(f"✓  {fn}"))
-                else:
-                    with lock: counts["errors"]+=1
-                    err=(res.stderr or res.stdout or "Unknown").strip()
-                    self.after(0,lambda fn=actual,e=err:self._log_msg(f"✗  {fn} — {e}"))
-            except Exception as ex:
-                with lock: counts["errors"]+=1
-                self.after(0,lambda fn=fn,e=str(ex):self._log_msg(f"✗  {fn} — {e}"))
+            actual=os.path.basename(fp)
+            ok,msg=embed_metadata_one(et,fp,title,kw_raw,desc,rm_prog,rm_copy)
+            if ok:
+                final_name=actual
+                if replace_fn and title:
+                    new_path=self._rename_to_title(fp,title)
+                    if new_path: final_name=os.path.basename(new_path)
+                with lock: counts["ok"]+=1; done[0]+=1
+                self.after(0,lambda fn=final_name:(self._log_msg(f"✓  {fn}"),_update_progress_ui()))
+            else:
+                with lock: counts["errors"]+=1; done[0]+=1
+                self.after(0,lambda fn=actual,e=msg:(self._log_msg(f"✗  {fn} — {e}"),_update_progress_ui()))
 
         def _finish():
             summary=f"{counts['ok']} embedded · {counts['skipped']} not found · {counts['errors']} errors"
             self.after(0,lambda:(self._log_msg(f"● Done — {summary}"),
+                self._embed_prog_bar.set(1.0),_update_progress_ui(),
                 self._emb_btn.configure(state="normal",text="▶  Start Again"),
                 setattr(self,'embed_running',False)))
 
