@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.2 — progress bars
+
+- Every progress bar in the app (Generate tab, Import dialog, Embed
+  window) was a thin 6px line that was easy to miss. Thickened all
+  three to a consistent 14px, fully rounded, with a subtle border for
+  definition — same accent color, just far easier to actually see
+  progress at a glance.
+
 ## v0.3.1 — bug-fix batch
 
 ### Root-caused: the card list overlap/garbling, "imports stop showing as cards"
