@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.5.1 — Prompt-to-Prompt Generator (Part 2 of the v0.5 spec) + provider updates
+
+**Prompt-to-Prompt Generator** — a brand-new workspace, fully wired into
+the nav (no longer a "coming soon" placeholder):
+- One prompt in, N new variations out (5/10/20/50/100), with Creativity
+  (Low/Medium/High) and Prompt Style (Maintain Original/Commercial/
+  Creative/Minimal/Highly Detailed) controls.
+- Runs as background batches (10 prompts per AI call) through the app's
+  existing bounded worker pool — Progress/Pause/Cancel all work, and
+  navigating to any other workspace never interrupts a run in progress.
+- Output list: per-prompt Copy, Select All, Copy All, Export TXT/CSV,
+  and Regenerate Selected (replaces only the checked prompts, keeps the
+  rest). Verified with a scripted test including that regenerating
+  selected prompts doesn't clobber the normal Generate flow afterward —
+  an actual bug caught while testing (see below).
+- Duplicate-safe: each batch is told what's already been generated so
+  far to steer away from repeats, plus a final normalized-text dedupe
+  pass across the whole result set.
+- Completions are recorded to the same stats DB the Dashboard reads
+  from, so its "Total Prompt-to-Prompt Generations" figure is real
+  starting now, not perpetually zero.
+
+**Engine change enabling the above**: every AI provider caller
+(`engine/ai_providers.py`) previously *required* an image — there was
+no way to send a text-only request through the app's AI engine. Rather
+than write a second, duplicate set of "text-only" callers (which the
+Smart Workflow spec's "never duplicate AI request logic" principle
+argues against), each existing caller now accepts `path=None` and
+simply omits the image part of the request. Zero behavior change for
+every existing caller — Standard/Smart Workflow/Prompt Generator always
+pass a real path, so their requests are byte-for-byte the same as
+before; verified by inspecting the actual request payload built with
+and without a path.
+
+**Bug found and fixed while testing this**: `_regenerate_selected` was
+reassigning the engine's `on_complete` callback to a one-off closure
+and never restoring it — so after using "Regenerate Selected" once, the
+next normal "Generate" click would silently misbehave (still running
+the regenerate-merge logic against a stale list). Fixed by using a
+stable single callback with a "pending keep" flag instead of swapping
+the callback itself.
+
+**Provider/model updates**:
+- Added the current Gemini 3.x Flash lineup — 3.6 Flash, 3.5 Flash, 3.5
+  Flash-Lite, 3.1 Flash-Lite, and 3 Flash (Preview) — verified against
+  Google's live models documentation rather than guessed. Also dropped
+  Gemini 2.0 Flash, which that same documentation confirms was shut
+  down June 1, 2026 — leaving it selectable would have just meant
+  picking a dead model.
+- Claude is now hidden from the AI Providers page and skipped during
+  generation failover — it has no free API tier, and this app is
+  free-providers-only. Uses the same `HIDDEN_PROVIDERS` mechanism
+  already in place for Grok/Groq, so nothing structural changed and
+  Claude support can be un-hidden later with a one-line change if that
+  ever matters.
+
 ## v0.5 — Dashboard & Global Navigation (Part 1 of the v0.5 spec)
 
 The biggest structural change yet: Meta Zone is no longer one flat
