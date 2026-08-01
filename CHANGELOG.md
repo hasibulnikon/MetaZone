@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.1 — Smart Workflow keyword ordering
+
+- Stage 5 (Metadata Optimization) never actually implemented the spec's
+  "Keyword ordering"/"Keyword importance" checks — it only scored
+  metadata, it didn't verify or fix ordering at all. Stage 4's prompt
+  already asks the AI for most-relevant-first keywords (same instruction
+  Standard Workflow uses), but that was a soft request with nothing
+  enforcing it in code.
+- Added: Stage 5 now re-ranks each result's keywords so any keyword that
+  actually appears in the title (the clearest "this is the central
+  subject" signal) moves toward the front — the most relevant keywords
+  now genuinely show top to bottom. It's a stable sort, so the AI's own
+  relative ordering is preserved within each relevance tier rather than
+  discarded; nothing is fabricated and no extra API calls are made.
+  Verified with a unit test confirming title-matching keywords move to
+  the front while both groups keep their original relative order.
+
 ## v0.4 — Smart Workflow (Beta)
 
 A brand-new, fully separate opt-in workflow — Standard Workflow is
