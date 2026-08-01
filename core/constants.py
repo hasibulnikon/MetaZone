@@ -3,7 +3,7 @@ keyword/title/description rules, supported file extensions. No logic
 here — just data other modules read.
 """
 
-APP_VERSION = "v0.5"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
+APP_VERSION = "v0.5.1"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
 
 AI_PROVIDERS = {
     "OpenRouter": {
@@ -21,8 +21,12 @@ AI_PROVIDERS = {
     },
     "Gemini": {
         "models": [
+            ("Gemini 3.6 Flash",         "gemini-3.6-flash"),
+            ("Gemini 3.5 Flash",         "gemini-3.5-flash"),
+            ("Gemini 3.5 Flash-Lite",    "gemini-3.5-flash-lite"),
+            ("Gemini 3.1 Flash-Lite",    "gemini-3.1-flash-lite"),
+            ("Gemini 3 Flash (Preview)", "gemini-3-flash-preview"),
             ("Gemini 2.5 Flash",     "gemini-2.5-flash"),
-            ("Gemini 2.0 Flash",     "gemini-2.0-flash"),
             ("Gemini 1.5 Flash",     "gemini-1.5-flash"),
             ("Gemini 1.5 Pro",       "gemini-1.5-pro"),
         ],
@@ -101,8 +105,9 @@ AI_PROVIDERS_ORDERED=["Gemini","Mistral","Groq","OpenAI","Claude","Grok","OpenRo
 # Hidden from the Configuration window's API Keys tabs and skipped during generation
 # failover — NOT deleted from AI_PROVIDERS/CALLERS/AI_PROVIDERS_ORDERED, so
 # re-enabling them later (or if their issues get sorted out) is just
-# removing an entry here, nothing structural.
-HIDDEN_PROVIDERS={"Grok","Groq"}
+# removing an entry here, nothing structural. Claude is hidden because it
+# has no free API tier and this app is free-providers-only.
+HIDDEN_PROVIDERS={"Grok","Groq","Claude"}
 VISIBLE_PROVIDERS=[p for p in AI_PROVIDERS_ORDERED if p not in HIDDEN_PROVIDERS]
 
 PLATFORM_RULES = {
