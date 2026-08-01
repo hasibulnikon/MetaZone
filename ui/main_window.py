@@ -712,14 +712,15 @@ class App(DnDCTk):
         self._register_drop_targets([ws,self._ws_empty])
 
         # Progress bar
-        prog=ctk.CTkFrame(main,fg_color=BG1,corner_radius=0,height=28)
+        prog=ctk.CTkFrame(main,fg_color=BG1,corner_radius=0,height=36)
         prog.grid(row=2,column=0,sticky="ew"); prog.grid_propagate(False)
         prog.grid_columnconfigure(1,weight=1)
         self._prog_lbl=ctk.CTkLabel(prog,text="● System Ready.",
             font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color=BG1)
         self._prog_lbl.grid(row=0,column=0,padx=(10,8),pady=4)
-        self._prog_bar=ctk.CTkProgressBar(prog,progress_color=GRN,fg_color=BG3,height=6,corner_radius=3)
-        self._prog_bar.grid(row=0,column=1,sticky="ew",pady=10,padx=(0,8)); self._prog_bar.set(0)
+        self._prog_bar=ctk.CTkProgressBar(prog,progress_color=GRN,fg_color=BG3,
+            border_width=1,border_color=GLASS_BDR,height=14,corner_radius=7)
+        self._prog_bar.grid(row=0,column=1,sticky="ew",pady=11,padx=(0,8)); self._prog_bar.set(0)
         self._prog_pct=ctk.CTkLabel(prog,text="",font=ctk.CTkFont("Segoe UI",10,"bold"),
             text_color=GRN,fg_color=BG1,width=36)
         self._prog_pct.grid(row=0,column=2,padx=(0,8))
