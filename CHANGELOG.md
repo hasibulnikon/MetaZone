@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.5 — Dashboard & Global Navigation (Part 1 of the v0.5 spec)
+
+The biggest structural change yet: Meta Zone is no longer one flat
+window — there's now a permanent left navigation rail and every tool is
+its own workspace. Switching workspaces never interrupts anything
+running in the background; verified with a scripted test that starts a
+generation batch, navigates through 4 different pages mid-run, and
+confirms all files still complete and get recorded correctly.
+
+**Dashboard** (now the landing page on launch):
+- Today's Statistics, Lifetime Statistics, AI Usage, Productivity
+  Insights, System Status, and Recent Activity — every number comes
+  from a new persistent SQLite store (`core/stats_db.py`) fed by real
+  completion events (metadata generation, embedding, prompt generation,
+  Smart Workflow runs). Nothing is simulated — a fresh install shows
+  zeros and "—", not sample data. Cost figures are explicitly labeled
+  "Est." since there's no real per-provider billing API to pull from.
+- A hand-drawn 7-day activity chart (plain Tkinter Canvas, no new
+  charting dependency).
+- Quick Actions that jump straight to the relevant workspace, including
+  "Resume Last Project" for an interrupted Smart Workflow run.
+
+**Global Navigation**: Dashboard, Smart Workflow, Metadata Generator,
+Metadata Embedder, Prompt Generator, Prompt-to-Prompt Generator, AI
+Providers, Settings, License, Help. Metadata Generator / Smart Workflow
+/ Prompt Generator all share the exact same underlying workspace and
+logic as before (no duplication) — the nav items just drive the
+existing workflow/mode toggles instead of introducing a second
+implementation.
+
+**Incidental bug found and fixed while testing this**: re-navigating to
+an already-active Metadata Generator/Prompt Generator/Smart Workflow
+page was calling the same internal mode-switch logic every time, which
+unconditionally cleared results — including a batch that was still
+running. Confirmed via test: without the fix, navigating away and back
+mid-generation silently dropped completed files back to "waiting" and
+the run finished 3 files short. Fixed by making the mode/workflow
+switches a no-op when already in the requested state.
+
+**Known limitations in this delivery** (spec's remaining pieces, coming
+next):
+- Prompt-to-Prompt Generator is not built yet — its nav item says so
+  honestly rather than faking a working page.
+- Metadata Embedder, AI Providers, and Settings are real, working pages
+  today, but each opens its existing dialog rather than being fully
+  redrawn inline — full in-page embedding is the other piece of this
+  spec still pending.
+- Settings doesn't yet have a "Reset Lifetime Statistics" button wired
+  up, even though `stats_db.reset_lifetime()` exists and works.
+- Not yet stress-tested with a real multi-thousand-file history in the
+  stats DB — only small synthetic batches so far.
+
 ## v0.4.1 — Smart Workflow keyword ordering
 
 - Stage 5 (Metadata Optimization) never actually implemented the spec's
