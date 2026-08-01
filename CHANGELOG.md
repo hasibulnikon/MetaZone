@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.3.1 — bug-fix batch
+
+### Root-caused: the card list overlap/garbling, "imports stop showing as cards"
+- The results area actually had two separate rendering systems fighting
+  each other: a hand-rolled virtualized "infinite scroll" (place()-based
+  absolute positioning + a row-height table) for Expanded/1-column, and a
+  separate paginated grid for Compact/multi-column.
+- Reproduced with a headless Xvfb + tkinter test harness: importing in
+  two batches that together crossed the old internal 60-file
+  "auto-compact" threshold silently shrank already-built cards' reserved
+  row height (274px → 134px) in the height table WITHOUT rebuilding the
+  actual widgets — so a still-274px-tall card ended up overlapping the
+  row below it by ~140px. This is the confirmed cause of "the first
+  dozen or so files look fine, then everything after looks like one
+  garbled/merged card."
+- Fix: removed the whole dual-system architecture (virtualization,
+  row-height table, the 120ms scroll-poll, place()-based positioning)
+  and unified every view mode onto one simple paginated grid renderer.
+  A page is always bounded by page size (default 50), so building it is
+  cheap even with 5,000+ files loaded, and there's no per-card
+  bookkeeping left that can fall out of sync with what's on screen.
+  This is also the most likely cause of the sidebar-collapse freeze and
+  the general page/view-switching lag, since the polling+internals-
+  reaching-in system this replaces was the most fragile part of the UI.
+- Verified via the same headless harness: import → clear → reimport,
+  import across the old threshold, switching Expanded/Compact, and
+  changing page size/navigating pages all now leave exactly one live
+  card per visible file, no overlap, no missing cards.
+
+### Compact View redesign
+- Rebuilt to match spec exactly: thumbnail with its shorter edge fixed
+  at 100px (aspect ratio preserved, longer edge capped so an extreme
+  panorama/portrait can't blow out the layout) — bigger than Expanded's
+  thumbnail, not smaller. Filename and file size stacked underneath it.
+- No longer editable — no textboxes. Shows a short snippet of
+  title/description with a character counter, the first 10 keywords
+  with a total-count counter, generation status, and a Regenerate
+  button.
+- Grid columns are now auto-fit to the available window width in
+  Compact (recomputed on resize) — the manual 1-4 column picker only
+  applies to Expanded, per request.
+
+### Other UI fixes
+- Fixed a real gap between the title/description boxes and the
+  keywords box in Expanded cards — the title/desc row was absorbing
+  all of the card's leftover vertical space instead of the keywords
+  row, leaving blank space above the keywords box.
+- Save button was much wider than its icon+text needed — shrunk.
+- Embed window now shows a live progress bar plus succeeded/failed/
+  not-found counts at the bottom, matching the Generate tab's progress
+  row, instead of only the Activity Log scrolling by.
+
+### API Keys — Mistral (and every provider) mass-deactivation bug
+- Found the actual cause of "adding a new API key deactivated every
+  other active key for that provider": `_add_key` unconditionally set
+  every existing key's `active` flag to False before adding the new
+  one as active — wiping out the whole failover set the moment someone
+  added one more key. Fixed: a new key now joins as active without
+  touching any other key's state.
+- Added "Activate All" / "Deactivate All" buttons under "Get API Key",
+  per provider.
+
 ## v0.3
 
 ### Theme customization
