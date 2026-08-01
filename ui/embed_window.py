@@ -1,9 +1,10 @@
 """Embed Metadata tab window — batch-writes CSV metadata into image/
 vector/video files via ExifTool."""
-import os, sys, csv, re, subprocess, threading
+import os, sys, csv, re, subprocess, threading, time
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
 from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one
+from core import stats_db
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,LOG_BG,ABSOLUTE_BG,AMB,AMB2)
 from ui.dnd import DND_AVAILABLE, DND_FILES
@@ -364,6 +365,7 @@ class EmbedWindow(ctk.CTkToplevel):
         if not fc or fc=="(skip)": messagebox.showerror("Column","Select filename column.",parent=self); return
         self.embed_running=True
         self._emb_btn.configure(state="disabled",text="⟳  Processing…")
+        self._embed_start_time=time.time()
         threading.Thread(target=self._embed_thread,args=(et,),daemon=True).start()
 
     def _embed_thread(self,et):
@@ -434,6 +436,12 @@ class EmbedWindow(ctk.CTkToplevel):
                 self._embed_prog_bar.set(1.0),_update_progress_ui(),
                 self._emb_btn.configure(state="normal",text="▶  Start Again"),
                 setattr(self,'embed_running',False)))
+            seconds=time.time()-getattr(self,"_embed_start_time",time.time())
+            if counts["ok"]>0:
+                stats_db.record("embedding","completed",count=counts["ok"],seconds=seconds,
+                                 detail=f"Files: {counts['ok']}")
+            if counts["errors"]>0:
+                stats_db.record("embedding","failed",count=counts["errors"])
 
         # Bounded parallel embedding (exiftool calls are mostly I/O wait,
         # not CPU-bound) — this is what actually makes a 100+ file batch
