@@ -91,6 +91,34 @@ def make_thumb(path, size=(120,85)):
         return None
 
 
+def make_thumb_min_edge(path, min_edge=100, max_edge=170):
+    """Compact View's thumbnail: unlike make_thumb's bounding-box fit
+    (both sides <= size), this scales so the SHORTER side is exactly
+    min_edge and the longer side follows the image's own aspect ratio —
+    capped at max_edge so an extreme panorama/vertical image can't blow
+    out the card's layout."""
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
+            return None
+        img = Image.open(path)
+        img = img.convert("RGB")
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return None
+        short = min(w, h)
+        scale = min_edge / float(short)
+        new_w, new_h = int(round(w * scale)), int(round(h * scale))
+        if max(new_w, new_h) > max_edge:
+            scale2 = max_edge / float(max(new_w, new_h))
+            new_w, new_h = int(round(new_w * scale2)), int(round(new_h * scale2))
+        new_w, new_h = max(new_w, 1), max(new_h, 1)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        return ctk.CTkImage(img, size=(new_w, new_h))
+    except Exception:
+        return None
+
+
 def img_to_b64(path):
     with open(path,'rb') as f: data=f.read()
     ext=os.path.splitext(path)[1].lower()
@@ -98,6 +126,31 @@ def img_to_b64(path):
           '.gif':'image/gif','.webp':'image/webp',
           '.tiff':'image/tiff','.tif':'image/tiff'}.get(ext,'image/jpeg')
     return base64.b64encode(data).decode(),mime
+
+def embed_metadata_one(et, fp, title="", kw_raw="", desc="", rm_prog=False, rm_copy=False):
+    """Write title/keywords/description into a single file via ExifTool.
+    Pure function, no UI/state — shared by ui/embed_window.py's CSV-driven
+    embed flow and smart_workflow's Stage 6, so the exiftool command
+    construction only lives in one place.
+    Returns (ok: bool, message: str) — message is either the affected
+    filename on success or the exiftool error text on failure."""
+    cmd=[et,'-overwrite_original','-codedcharacterset=UTF8']
+    if title: cmd+=[f'-Title={title}',f'-ObjectName={title}',f'-Headline={title}']
+    if kw_raw:
+        for kw in [k.strip() for k in kw_raw.replace(';',',').split(',') if k.strip()]:
+            cmd+=[f'-Keywords={kw}',f'-Subject={kw}']
+    if desc: cmd+=[f'-Description={desc}',f'-Caption-Abstract={desc}']
+    if rm_prog: cmd+=['-Software=','-CreatorTool=','-HistorySoftwareAgent=']
+    if rm_copy: cmd+=['-Rights=','-Copyright=','-CopyrightNotice=','-Creator=']
+    cmd.append(fp)
+    try:
+        flags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
+        res=subprocess.run(cmd,capture_output=True,text=True,timeout=30,creationflags=flags)
+        if res.returncode==0:
+            return True, os.path.basename(fp)
+        return False, (res.stderr or res.stdout or "Unknown").strip()
+    except Exception as ex:
+        return False, str(ex)
 
 def format_filesize(path):
     try:
@@ -117,15 +170,28 @@ def relaunch_app():
     choice actually take effect, not a live-reactive rebuild. Handles
     both running from source (python app.py) and the packaged frozen
     EXE — a frozen build has no Python interpreter to hand a script to,
-    so it must re-launch sys.executable directly with no arguments."""
+    so it must re-launch sys.executable directly with no arguments.
+
+    IMPORTANT (frozen/onefile only): the child MUST NOT inherit this
+    process's _MEIPASS2 env var. PyInstaller's onefile bootloader sets
+    _MEIPASS2 internally once it has extracted itself; if a relaunched
+    child inherits that value (subprocess.Popen inherits the full
+    environment by default), its bootloader assumes it's already
+    extracted and tries to run directly off THIS process's temp folder
+    instead of doing its own fresh extraction. That folder disappears
+    once this process exits, so the child breaks the moment you relaunch
+    a second time in the same session (the first relaunch can appear to
+    work purely because the old temp folder hasn't been cleaned up yet)."""
     try:
+        env=os.environ.copy()
+        env.pop("_MEIPASS2",None)
         if getattr(sys,"frozen",False):
-            subprocess.Popen([sys.executable])
+            subprocess.Popen([sys.executable],env=env)
         else:
             main_mod=sys.modules.get("__main__")
             main_file=getattr(main_mod,"__file__",None)
             if main_file:
-                subprocess.Popen([sys.executable,os.path.abspath(main_file)])
+                subprocess.Popen([sys.executable,os.path.abspath(main_file)],env=env)
     finally:
         os._exit(0)
 
