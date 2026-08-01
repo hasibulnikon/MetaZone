@@ -11,6 +11,8 @@ from core.constants import (APP_VERSION, PLATFORM_RULES, CONTENT_SUFFIXES,
     VECTOR_EXTS, VIDEO_EXTS, ALL_SUPPORTED_EXTS)
 from core.config import load_prefs, save_prefs
 from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label
+from smart_workflow.panel import SmartWorkflowPanel
+from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
 from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
@@ -255,6 +257,30 @@ class App(DnDCTk):
             text_color=TXT3,fg_color=BG2); self._api_lbl.pack(anchor="w",padx=12,pady=(0,4))
         self._refresh_api_lbl()
 
+        # Workflow Mode — Standard is always the default at launch; Smart
+        # Workflow is opt-in and lives entirely in its own module (see
+        # smart_workflow/), raised over the results area only when picked
+        # — the image import row above stays shared between both modes,
+        # and Standard's own code path is never touched by switching.
+        self._div(inner)
+        self.workflow_var=StringVar(value="standard")
+        wf=ctk.CTkFrame(inner,fg_color=BG3,corner_radius=8)
+        wf.pack(fill="x",padx=10,pady=(4,8))
+        wf.grid_columnconfigure(0,weight=1); wf.grid_columnconfigure(1,weight=1)
+        self._wf_standard_btn=ctk.CTkButton(wf,text="Standard Workflow",height=34,
+            font=ctk.CTkFont("Segoe UI",10,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=6,
+            command=lambda:self._set_workflow("standard"))
+        self._wf_standard_btn.grid(row=0,column=0,sticky="ew",padx=(4,2),pady=4)
+        self._wf_smart_btn=ctk.CTkButton(wf,text="⚡ Smart Workflow",height=34,
+            font=ctk.CTkFont("Segoe UI",10,"bold"),
+            fg_color="transparent",hover_color=BG4,text_color=TXT3,corner_radius=6,
+            command=lambda:self._set_workflow("smart"))
+        self._wf_smart_btn.grid(row=0,column=1,sticky="ew",padx=(2,4),pady=4)
+        ctk.CTkLabel(inner,text="BETA — automates preview, quality check,\ngeneration, embedding & filing in one run",
+            font=ctk.CTkFont("Segoe UI",9),text_color=TXT3,fg_color=BG2,justify="left"
+        ).pack(anchor="w",padx=12,pady=(0,4))
+
         # Concurrency slider
         self._div(inner)
         cf=ctk.CTkFrame(inner,fg_color=BG2,corner_radius=0)
@@ -475,6 +501,36 @@ class App(DnDCTk):
         for p in list(self._all_paths):
             self._results[p]={"status":"waiting"}
         self._render_page()
+
+    def _set_workflow(self,mode):
+        self.workflow_var.set(mode)
+        active=mode=="smart"
+        self._wf_standard_btn.configure(
+            fg_color="transparent" if active else GRN,
+            text_color=TXT3 if active else ABSOLUTE_BG)
+        self._wf_smart_btn.configure(
+            fg_color=GRN if active else "transparent",
+            text_color=ABSOLUTE_BG if active else TXT3)
+        if active:
+            self._smart_frame.tkraise()
+            self._smart_frame.refresh_file_count()
+        else:
+            self._smart_frame.lower()
+
+    def _check_smart_resume(self):
+        """Startup check for an interrupted Smart Workflow run — per spec,
+        this only ever looks at the folder the last run was actually
+        working in (saved to prefs the moment a run starts), never
+        anything Standard Workflow touches."""
+        folder=self.prefs.get("last_smart_folder","")
+        if not folder: return
+        resumable=smart_state.find_resumable(folder)
+        if not resumable: return
+        if messagebox.askyesno("Resume previous Smart Workflow?",
+                f"An unfinished Smart Workflow run was found in:\n{folder}\n\nResume it?",
+                parent=self):
+            self._set_workflow("smart")
+            self._smart_frame.resume_from(resumable,folder)
 
     def _on_platform_scroll(self,event,direction=None):
         plats=list(PLATFORM_RULES.keys())
@@ -828,6 +884,19 @@ class App(DnDCTk):
         # upload bar) works — tkdnd only fires on widgets that registered.
         self._register_drop_targets([main,topbar,gen,gen_hdr,self._gen_scroll,
                                       self._gen_empty_lbl,self._sb])
+
+        # ── Smart Workflow (separate module, never touches the above) ──
+        # Occupies the same grid cells as the topbar/upload-zone/progress-
+        # bar/results rows (0-3), raised over all of them with tkraise()/
+        # lowered with lower() — neither mode's widgets are ever destroyed
+        # or rebuilt on switch. Files are imported the same way regardless
+        # of which mode is currently showing (drag-and-drop/Browse write
+        # straight to self._all_paths); switch to Smart Workflow once
+        # they're loaded to hand that same file list to its own pipeline.
+        self._smart_frame=SmartWorkflowPanel(self._main,self)
+        self._smart_frame.grid(row=0,column=0,rowspan=4,sticky="nsew")
+        self._smart_frame.lower()
+        self.after(400,self._check_smart_resume)
 
     def _open_embed(self):
         # Pass the last generated CSV path (and the image folder just used)
