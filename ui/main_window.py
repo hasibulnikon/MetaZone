@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, StringVar, BooleanVar, IntVar
 from core.constants import (APP_VERSION, PLATFORM_RULES, CONTENT_SUFFIXES,
     VECTOR_EXTS, VIDEO_EXTS, ALL_SUPPORTED_EXTS)
 from core.config import load_prefs, save_prefs
-from core.utils import find_exiftool, check_online, make_thumb, model_label
+from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
 from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
@@ -38,20 +38,13 @@ class App(DnDCTk):
         self._card_by_path={}
         self.ai_running=False; self.ai_stop_flag=False
         self._ai_paused=False; self.current_mode="meta"
-        self._path_idx={}; self._expanded_paths=set(); self._source_folder=""
-        self._compact_mode=False; self._gen_epoch=0
+        self._path_idx={}; self._source_folder=""
+        self._gen_epoch=0
         self._show_desc_mode=True
         self._task_mgr=TaskManager()
-        # Per-row cumulative pixel heights (see _row_h_for/_rebuild_cum_heights/
-        # _append_cum_height below) — replaces a single uniform row-height
-        # estimate, which is what let an individually-expanded card inside an
-        # otherwise-compact batch overlap the row below it.
-        self._cum_heights=[0]
-        # View Settings -- Compact View and/or >1 columns switch the
-        # results area from the tested virtualized infinite-scroll to a
-        # simpler paginated grid (see _use_paged_grid/_render_page below).
-        # Expanded + 1 column (the default) keeps using the existing,
-        # already-hardened virtualized scroll untouched.
+        # View Settings — Expanded (1-4 user-selectable columns) or Compact
+        # (columns auto-fit to the available width). Both render through
+        # the single paginated-grid renderer — see _render_page below.
         self.view_mode_var=StringVar(value=self.prefs.get("view_mode","expanded"))
         self.grid_cols_var=IntVar(value=self.prefs.get("grid_cols",1))
         self.page_size_var=IntVar(value=self.prefs.get("page_size",50))
@@ -85,18 +78,21 @@ class App(DnDCTk):
     def _start_thumb_workers(self,n=4):
         def worker():
             while True:
-                path,size,widget=self._thumb_job_queue.get()
-                img=make_thumb(path,size)
+                path,size,widget,min_edge=self._thumb_job_queue.get()
+                if min_edge:
+                    img=make_thumb_min_edge(path,min_edge=min_edge)
+                else:
+                    img=make_thumb(path,size)
                 if img is not None:
                     self._thumb_queue.put((widget,img))
         for _ in range(n):
             threading.Thread(target=worker,daemon=True).start()
 
-    def _request_thumb(self,path,widget,size=(58,58)):
+    def _request_thumb(self,path,widget,size=(58,58),min_edge=None):
         """Queue a thumbnail decode job for the bounded worker pool instead
         of spawning a fresh OS thread per image — this is what previously
         caused thread-storm freezes/races when importing many images."""
-        self._thumb_job_queue.put((path,size,widget))
+        self._thumb_job_queue.put((path,size,widget,min_edge))
 
     def _center(self,w,h):
         self.update_idletasks()
@@ -478,13 +474,7 @@ class App(DnDCTk):
         self._clear_results()
         for p in list(self._all_paths):
             self._results[p]={"status":"waiting"}
-        if self._use_paged_grid():
-            self._render_page()
-        else:
-            self._path_idx={p:i for i,p in enumerate(self._all_paths)}
-            self._rebuild_cum_heights()
-            self._update_virtual_height()
-            self._reconcile_visible()
+        self._render_page()
 
     def _on_platform_scroll(self,event,direction=None):
         plats=list(PLATFORM_RULES.keys())
@@ -694,7 +684,7 @@ class App(DnDCTk):
         # keywords from currently-materialized cards into self._results
         # and writes the working CSV in place — doesn't require going
         # through Export CSV's save dialog first.
-        self._save_btn=ctk.CTkButton(btn_f,text="💾  Save",width=96,height=32,
+        self._save_btn=ctk.CTkButton(btn_f,text="💾 Save",width=64,height=32,
             font=ctk.CTkFont("Segoe UI",11,"bold"),
             fg_color=GRN_DIM,hover_color=GRN_H,text_color=GRN,
             border_width=1,border_color=GRN,corner_radius=8,
@@ -759,11 +749,13 @@ class App(DnDCTk):
             fg_color="transparent",hover_color=BG3,text_color=TXT3,corner_radius=6,
             command=lambda:self._set_view_mode("compact"))
         self._view_compact_btn.pack(side="left",padx=(0,10))
-        ctk.CTkLabel(vs,text="Cols:",font=ctk.CTkFont("Segoe UI",10),
+        self._cols_row=ctk.CTkFrame(vs,fg_color="transparent",corner_radius=0)
+        self._cols_row.pack(side="left")
+        ctk.CTkLabel(self._cols_row,text="Cols:",font=ctk.CTkFont("Segoe UI",10),
             text_color=TXT3,fg_color="transparent").pack(side="left",padx=(0,4))
         self._col_btns={}
         for n in (1,2,3,4):
-            b=ctk.CTkButton(vs,text=str(n),width=26,height=26,
+            b=ctk.CTkButton(self._cols_row,text=str(n),width=26,height=26,
                 font=ctk.CTkFont("Segoe UI",10,"bold"),
                 fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
                 command=lambda n=n:self._set_grid_cols(n))
@@ -801,45 +793,35 @@ class App(DnDCTk):
             font=ctk.CTkFont("Segoe UI",12),text_color=TXT3,fg_color="transparent")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
 
-        # Floating scroll buttons — jump exactly 3 rows (a full screen's
-        # worth, since 3 cards fit the viewport) using the real per-row
-        # cumulative heights, so it works correctly even with some cards
-        # individually expanded. Placed on `gen` (not `_gen_scroll`) so
+        # Floating page-nav buttons — quick prev/next page without reaching
+        # for the header controls. Placed on `gen` (not `_gen_scroll`) so
         # they float above the list instead of scrolling away with it.
         self._scroll_down_btn=ctk.CTkButton(gen,text="▼",width=36,height=36,
             font=ctk.CTkFont("Segoe UI",14,"bold"),
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
-            command=lambda:self._scroll_cards_by(3))
+            command=lambda:self._go_page(1))
         self._scroll_down_btn.place(relx=1.0,rely=1.0,x=-14,y=-14,anchor="se")
         self._scroll_up_btn=ctk.CTkButton(gen,text="▲",width=36,height=36,
             font=ctk.CTkFont("Segoe UI",14,"bold"),
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
-            command=lambda:self._scroll_cards_by(-3))
+            command=lambda:self._go_page(-1))
         self._scroll_up_btn.place(relx=1.0,rely=1.0,x=-14,y=-56,anchor="se")
         self._scroll_down_btn.lift(); self._scroll_up_btn.lift()
 
-        # ── Card virtualization ──────────────────────────────────────────
-        # Only ever build real card widgets for what's actually near the
-        # visible viewport (+ a buffer), no matter how many files are
-        # loaded — this is what actually bounds memory/CPU/render cost at
-        # 1000-file scale, rather than just making each card cheaper.
-        # The scrollable frame's content is a single embedded Canvas
-        # "window" item — its bounding box (and therefore the scrollbar
-        # size) is driven by that item's configured height, NOT by where
-        # place()-managed children sit (place() doesn't propagate size to
-        # its parent the way pack/grid do). So instead of a spacer widget,
-        # we directly itemconfigure() the canvas window's height to the
-        # full virtual list height; cards are positioned with place() at
-        # y = row_index * row_height. Row height is an estimate (compact
-        # rows are much shorter than expanded ones) — accurate enough for
-        # smooth scrolling; an individual card manually expanded inside a
-        # compact-mode batch can slightly overlap its neighbor since its
-        # real height won't match the estimate, which is a cosmetic edge
-        # case, not a functional one.
-        self._scroll_poll_id=None
-        self._start_scroll_poll()
+        # ── Card rendering ────────────────────────────────────────────
+        # A single paginated-grid renderer (_render_page) handles every
+        # view mode. Each page is bounded by page_size (default 50), so
+        # building a page is cheap regardless of how many files are
+        # loaded overall (5000+) — no per-card virtualization/placement
+        # math is needed, which is what previously let a card's reserved
+        # row silently fall out of sync with its actual built size (e.g.
+        # when a large import crossed an internal size threshold) and
+        # made cards overlap or seem to vanish. Recompute the auto-fit
+        # compact column count when the window is resized.
+        self._resize_after_id=None
+        self._gen_scroll.bind("<Configure>",self._on_results_resize)
 
         # Cover the rest of the window so dropping anywhere (not just the
         # upload bar) works — tkdnd only fires on widgets that registered.
@@ -922,31 +904,28 @@ class App(DnDCTk):
         # _update_desc_toggle_lock) — this is what it's locked in AS.
         if not self._all_paths:
             self._show_desc_mode=self.ai_include_desc_var.get()
-        # Decide compact-vs-expanded ONCE for this whole batch, using the
-        # total it will end up at — otherwise the first ~60 cards of a big
-        # import got built as heavy/expanded before the count crossed the
-        # threshold, and only the rest went compact.
-        self._compact_mode=(len(self._all_paths)+len(new))>60
-        self._rebuild_cum_heights()
         if len(new)>15:
             self._import_with_progress(new)
         else:
             for p in new: self._make_blank_card(p)
             self._gen_btn.configure(text=f"✨  Generate ({len(self._all_paths)})")
             self._update_progress()
-            if self._use_paged_grid(): self._render_page()
+            self._update_desc_toggle_lock()
+            self._render_page()
         self._update_dropzone_visibility()
 
     def _import_with_progress(self,paths):
-        """Create blank cards in small UI batches (so the event loop is
-        never blocked for more than a few widgets at a time), with a visible
-        progress dialog — thumbnails are decoded separately by the bounded
-        worker pool, never on the main thread."""
+        """Record every path in small batches (so the event loop is never
+        blocked for more than a moment), with a visible progress dialog.
+        No widgets are built here — that's _render_page()'s job, once, for
+        whichever page is actually showing — so this loop is just cheap
+        bookkeeping even for a 5,000-file batch. Thumbnails are decoded
+        separately by the bounded worker pool, never on the main thread."""
         dlg=ImportProgressDialog(self,len(paths))
         total=len(paths); state={"i":0}
 
         def add_batch():
-            BATCH=8
+            BATCH=200
             end=min(state["i"]+BATCH,total)
             for idx in range(state["i"],end):
                 self._make_blank_card(paths[idx])
@@ -958,16 +937,53 @@ class App(DnDCTk):
                 self._gen_btn.configure(text=f"✨  Generate ({len(self._all_paths)})")
                 self._update_progress()
                 self._update_dropzone_visibility()
-                if self._use_paged_grid(): self._render_page()
+                self._update_desc_toggle_lock()
+                self._render_page()
                 dlg.finish()
         self.after(10,add_batch)
 
+    def _make_blank_card(self,path):
+        """Just records the path + its initial result — no widget is ever
+        built here. _render_page() is the only thing that ever creates
+        card widgets, always for the current page, always from scratch —
+        so there's no per-card bookkeeping (row heights, expand state,
+        auto-compact thresholds) that can fall out of sync with what's
+        actually on screen."""
+        self._all_paths.append(path)
+        self._results[path]={"status":"waiting"}
+
+    # ── Rendering (single paginated-grid renderer for every view mode) ──
+    CARD_MIN_W=340  # target width used to auto-fit Compact columns
+
+    def _on_results_resize(self,event=None):
+        """Debounced: recompute Compact's auto-fit column count on resize,
+        and only actually re-render if that count changed (otherwise a
+        window drag would re-render the whole page on every pixel)."""
+        if self._resize_after_id:
+            try: self.after_cancel(self._resize_after_id)
+            except Exception: pass
+        self._resize_after_id=self.after(150,self._maybe_rerender_on_resize)
+
+    def _maybe_rerender_on_resize(self):
+        self._resize_after_id=None
+        if self.view_mode_var.get()=="compact":
+            new_cols=self._auto_compact_cols()
+            if new_cols!=getattr(self,"_last_auto_cols",None):
+                self._render_page()
+
+    def _auto_compact_cols(self):
+        try:
+            w=self._gen_scroll.winfo_width() or 1
+        except Exception:
+            w=1
+        return max(1,min(6,w//self.CARD_MIN_W))
+
     def _render_page(self):
-        """Paged-grid renderer used for Compact View and/or >1 columns.
-        Builds the current page's cards as plain grid children — no
-        virtualization needed here, since a page is always bounded by
-        page_size (default 50), so building all of them at once is cheap
-        regardless of how many files are loaded overall."""
+        """The one and only card renderer. Destroys and rebuilds the
+        current page's cards from scratch every time — bounded by
+        page_size (default 50) regardless of how many files are loaded
+        overall, so this stays cheap even at 5,000+ images. Syncs any
+        hand-edited text out of the outgoing cards first so it isn't lost."""
         for p,c in list(self._card_by_path.items()):
             self._sync_card_edits(p,c)
             try: c.destroy()
@@ -982,8 +998,16 @@ class App(DnDCTk):
         if total==0:
             self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
             self._page_lbl.configure(text="Page 1/1")
+            self._refresh_view_settings_ui()
             return
         self._gen_empty_lbl.place_forget()
+
+        compact=self.view_mode_var.get()=="compact"
+        if compact:
+            cols=self._auto_compact_cols()
+            self._last_auto_cols=cols
+        else:
+            cols=max(1,min(int(self.grid_cols_var.get() or 1),4))
 
         size=max(int(self.page_size_var.get() or 50),1)
         n_pages=max((total+size-1)//size,1)
@@ -992,11 +1016,9 @@ class App(DnDCTk):
         end=min(start+size,total)
         page_paths=self._all_paths[start:end]
 
-        cols=max(1,min(int(self.grid_cols_var.get() or 1),4))
         for c in range(cols):
             self._gen_scroll.grid_columnconfigure(c,weight=1)
 
-        compact=self.view_mode_var.get()=="compact"
         show_desc=getattr(self,'_show_desc_mode',True)
         for i,path in enumerate(page_paths):
             result=self._results.get(path,{"status":"waiting"})
@@ -1013,6 +1035,7 @@ class App(DnDCTk):
             self._card_by_path[path]=card
 
         self._page_lbl.configure(text=f"Page {self._current_page+1}/{n_pages}")
+        self._refresh_view_settings_ui()
 
     def _go_page(self,delta):
         self._current_page+=delta
@@ -1022,43 +1045,13 @@ class App(DnDCTk):
         self.view_mode_var.set(mode)
         self._current_page=0
         self._save_settings()
-        self._apply_view_mode_change()
+        self._render_page()
 
     def _set_grid_cols(self,n):
         self.grid_cols_var.set(n)
         self._current_page=0
         self._save_settings()
-        self._apply_view_mode_change()
-
-    def _apply_view_mode_change(self):
-        """Switch the results area between the virtualized infinite-scroll
-        (expanded + 1 column) and the paginated grid (Compact View, or
-        >1 columns) — whichever the current View Settings call for."""
-        # Sync + clear whatever's currently shown, regardless of which
-        # system built it, before switching.
-        for p,c in list(self._card_by_path.items()):
-            self._sync_card_edits(p,c)
-            try: c.destroy()
-            except: pass
-        self._card_by_path={}
-        for child in list(self._gen_scroll.winfo_children()):
-            if child is not self._gen_empty_lbl:
-                try: child.destroy()
-                except: pass
-
-        if self._use_paged_grid():
-            self._render_page()
-        else:
-            # Coming from paged-grid mode (or fresh), _path_idx/_cum_heights
-            # may be empty or stale — rebuild them from _all_paths so the
-            # virtualized scroll has correct bookkeeping to work from.
-            self._path_idx={p:i for i,p in enumerate(self._all_paths)}
-            self._rebuild_cum_heights()
-            self._update_virtual_height()
-            if not self._all_paths:
-                self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
-            self._reconcile_visible()
-        self._refresh_view_settings_ui()
+        self._render_page()
 
     def _refresh_view_settings_ui(self):
         expanded=self.view_mode_var.get()!="compact"
@@ -1068,215 +1061,29 @@ class App(DnDCTk):
         self._view_compact_btn.configure(
             fg_color="transparent" if expanded else GRN,
             text_color=TXT3 if expanded else ABSOLUTE_BG)
-        cur_cols=int(self.grid_cols_var.get() or 1)
-        for n,b in self._col_btns.items():
-            b.configure(fg_color=GRN if n==cur_cols else BG3,
-                        text_color=ABSOLUTE_BG if n==cur_cols else TXT2)
-        if self._use_paged_grid():
+        # Manual column choice only makes sense in Expanded — Compact
+        # always auto-fits as many columns as the window width allows.
+        if expanded:
+            self._cols_row.pack(side="left")
+            cur_cols=int(self.grid_cols_var.get() or 1)
+            for n,b in self._col_btns.items():
+                b.configure(fg_color=GRN if n==cur_cols else BG3,
+                            text_color=ABSOLUTE_BG if n==cur_cols else TXT2)
+        else:
+            self._cols_row.pack_forget()
+        total=len(self._all_paths)
+        size=max(int(self.page_size_var.get() or 50),1)
+        if total>size:
             self._page_nav.pack(side="left",padx=(10,0))
         else:
             self._page_nav.pack_forget()
 
-    def _use_paged_grid(self):
-        """Compact View, or more than 1 column, uses the simpler paginated
-        grid renderer instead of the virtualized infinite-scroll — see
-        _render_page(). Expanded + 1 column (the default) keeps using the
-        existing, already-hardened virtualization untouched."""
-        return self.view_mode_var.get()=="compact" or int(self.grid_cols_var.get() or 1)>1
-
-    def _make_blank_card(self,path):
-        """Add path to the queue. In the default (expanded, 1 column)
-        view this also registers it with the virtualized scroll system —
-        only paths near the visible viewport get a real widget,
-        _reconcile_visible() decides that. In paged-grid mode, cards are
-        built per-page on demand by _render_page() instead, so there's
-        nothing to do here beyond recording the path."""
-        self._all_paths.append(path)
-        self._results[path]={"status":"waiting"}
-        if self._use_paged_grid():
-            self._update_desc_toggle_lock()
-            return None
-        idx=self._path_idx.get(path)
-        if idx is None:
-            idx=len(self._path_idx); self._path_idx[path]=idx
-            self._append_cum_height(path)
-        self._update_virtual_height()
-        self._reconcile_visible()
-        self._update_desc_toggle_lock()
-        return self._card_by_path.get(path)
-
-    def _scroll_cards_by(self,n):
-        """Scroll the results list by exactly n rows (+3 down / -3 up per
-        click), using the real per-row cumulative heights — this moves by
-        n whole cards regardless of any of them being individually
-        expanded, unlike a flat pixel-based scroll."""
-        cum=self._cum_heights
-        if len(cum)<2: return
-        total_h=cum[-1]
-        if total_h<=0: return
-        canvas=self._gen_scroll._parent_canvas
-        top_frac,_=canvas.yview()
-        top_px=top_frac*total_h
-        cur_idx=max(bisect.bisect_right(cum,top_px)-1,0)
-        target_idx=max(0,min(cur_idx+n,len(cum)-2))
-        canvas.yview_moveto(cum[target_idx]/total_h)
-
-    def _row_h_for(self,path):
-        """Effective (unscaled) row height for THIS specific card, based on
-        its own current expand state — not one value for the whole batch.
-        This is what fixes cards overlapping when a single card is expanded
-        inside an otherwise-compact large batch: that row now actually
-        reserves the taller slot it needs instead of reserving the same
-        slot as every other (compact) row."""
-        base_expanded=238 if self.current_mode=="prompt" else 274
-        if not getattr(self,'_compact_mode',False):
-            return base_expanded
-        return base_expanded if path in self._expanded_paths else 134
-
-    def _rebuild_cum_heights(self):
-        """Full prefix-sum rebuild: cum[i] = pixel Y-start of row i,
-        cum[-1] = total virtual list height. Only called on batch-wide
-        events (mode switch, clear, expand/collapse toggle) — all rare,
-        user-triggered actions — never in the per-card add loop or the
-        scroll-poll, where an O(n) rebuild every call would actually hurt
-        the load-time/scroll-smoothness this virtualization exists for."""
-        order=sorted(self._path_idx.items(), key=lambda kv: kv[1])
-        scale=self._gen_scroll._apply_widget_scaling
-        cum=[0]; acc=0
-        for path,_ in order:
-            acc+=scale(self._row_h_for(path))
-            cum.append(acc)
-        self._cum_heights=cum
-
-    def _append_cum_height(self,path):
-        """O(1) growth for the common case: a brand-new path always gets
-        the next index, so its row just extends the existing prefix-sum
-        instead of needing a full rebuild — this is what keeps importing
-        a large batch fast."""
-        scale=self._gen_scroll._apply_widget_scaling
-        h=scale(self._row_h_for(path))
-        self._cum_heights.append(self._cum_heights[-1]+h)
-
-    def _reposition_visible_cards(self):
-        """After a rebuild (e.g. expand/collapse), every row from the
-        changed one onward may have shifted — move any card that's
-        currently materialized to its new Y without destroying/rebuilding
-        it, then let _reconcile_visible sort out what should newly be
-        (de)materialized given the shift."""
-        for path,card in self._card_by_path.items():
-            idx=self._path_idx.get(path)
-            if idx is not None and idx+1<len(self._cum_heights):
-                try: tkinter.Place.place(card,y=self._cum_heights[idx])
-                except Exception: pass
-
-    def _update_virtual_height(self):
-        """Force the canvas's embedded content-window to the full virtual
-        list height, so the scrollbar reflects the FULL list even though
-        most rows have no real widget. This is what CTk's own
-        scrollregion-on-<Configure> binding reacts to; a spacer widget
-        placed at the bottom does NOT work here because place()-managed
-        children don't propagate their position into the parent frame's
-        own requested size the way pack/grid children do."""
-        total=max(self._cum_heights[-1] if self._cum_heights else 0,1)
-        canvas=self._gen_scroll._parent_canvas
-        win_id=self._gen_scroll._create_window_id
-        canvas.itemconfigure(win_id,height=total)
-        canvas.configure(scrollregion=canvas.bbox("all"))
-
-    def _start_scroll_poll(self):
-        """Re-check which rows should be materialized ~8x/sec. Polling
-        (rather than trying to hook a Canvas 'scrolled' event, which
-        tkinter doesn't really have — yview() changes don't fire
-        <Configure>) is the standard, robust way to do this: it catches
-        mouse wheel, scrollbar drag, and keyboard scrolling alike without
-        depending on customtkinter's internals firing any particular
-        event. The check itself is cheap (a yview() read + a set diff),
-        so polling it is not a meaningful cost next to the widgets it's
-        saving us from building."""
-        try:
-            self._reconcile_visible()
-        except Exception:
-            pass
-        self._scroll_poll_id=self.after(120,self._start_scroll_poll)
-
-    def _reconcile_visible(self):
-        """Materialize cards for rows in/near the visible viewport; tear
-        down any card that's scrolled out of that range. Data
-        (self._results, self._path_idx, self._expanded_paths) is never
-        touched here — only the widgets are transient."""
-        total_rows=len(self._path_idx)
-        if total_rows==0: return
-        canvas=getattr(self._gen_scroll,'_parent_canvas',None)
-        if canvas is None: return  # defensive: fall back to "show nothing new" if ctk internals ever change
-        try:
-            top_frac,bot_frac=canvas.yview()
-        except Exception:
-            return
-        cum=self._cum_heights
-        total_h=cum[-1] if cum else 0
-        if total_h<=0: return
-        top_px=top_frac*total_h; bot_px=bot_frac*total_h
-        # bisect finds which row's [cum[i], cum[i+1]) span contains the
-        # pixel offset — works correctly even when rows have different
-        # heights (mixed compact/expanded), unlike a flat division.
-        start=bisect.bisect_right(cum,top_px)-1-VIRT_BUFFER
-        end=bisect.bisect_right(cum,bot_px)-1+VIRT_BUFFER
-        start=max(start,0); end=min(end,total_rows-1)
-        want={p for p,i in self._path_idx.items() if start<=i<=end}
-        # Drop cards that scrolled out of range — but first read back
-        # anything the user hand-edited in its text boxes, or that edit
-        # is lost the moment the widget is destroyed (this was the actual
-        # cause of edits reverting after a long scroll).
-        for p in list(self._card_by_path.keys()):
-            if p not in want:
-                c=self._card_by_path.pop(p)
-                self._sync_card_edits(p,c)
-                try: c.destroy()
-                except: pass
-        # Build cards that scrolled into range
-        for p in want:
-            if p not in self._card_by_path:
-                self._place_card_for(p)
-
-    def _place_card_for(self,path):
-        """Create (or recreate) the card widget for a path already present
-        in self._all_paths/_results, at its position from the real
-        per-row cumulative-height table (not a flat idx*row_height), so
-        an individually-expanded card's row is exactly as tall as that
-        card actually is — nothing above or below it can overlap."""
-        if self._gen_empty_lbl.winfo_viewable():
-            self._gen_empty_lbl.place_forget()
-        idx=self._path_idx.get(path)
-        if idx is None:
-            idx=len(self._path_idx); self._path_idx[path]=idx
-            self._append_cum_height(path)
-        # Large batches default to compact cards (no Textboxes/copy-paste
-        # buttons) so each materialized widget is also as cheap as
-        # possible — virtualization bounds HOW MANY are alive at once,
-        # compact mode bounds how heavy each one is. Both stack.
-        compact_default=getattr(self,'_compact_mode',False)
-        expanded=(path in self._expanded_paths) or not compact_default
-        card=MetaResultCard(self._gen_scroll,path,self._results[path],
-            on_redo=lambda p=path:self._redo_single(p),mode=self.current_mode,
-            request_thumb=self._request_thumb,expanded=expanded,
-            on_toggle_expand=(lambda p=path:self._toggle_expand(p)) if compact_default else None,
-            show_desc=getattr(self,'_show_desc_mode',True))
-        sx=card._apply_widget_scaling(4)
-        sy=self._cum_heights[idx] if idx+1<len(self._cum_heights) else self._cum_heights[-1]
-        tkinter.Place.place(card,x=sx,y=sy,relwidth=1,width=-8)
-        self._card_by_path[path]=card
-        return card
-
     def _sync_card_edits(self,path,card):
         """Read back whatever's currently in a card's editable text boxes
         (title/description/keywords, or prompt) into self._results, so a
-        manual hand-edit survives the card widget itself being destroyed
-        — whether that's from scrolling it out of the virtualized view or
-        from collapsing/expanding it. Only touches those specific text
-        fields, not the card's whole result snapshot — that snapshot's
-        other fields (status, model_used) are frozen at card-build time
-        and would clobber a live update (e.g. a concurrent regenerate)
-        if merged wholesale."""
+        manual hand-edit survives the page being rebuilt. Cards with no
+        editable boxes at all (the current read-only Compact card) simply
+        have nothing to sync — that's expected, not an error."""
         boxes=getattr(card,"_boxes",None)
         if not boxes or path not in self._results:
             return
@@ -1285,26 +1092,6 @@ class App(DnDCTk):
                 self._results[path][key]=box.get("1.0","end-1c")
             except Exception:
                 pass
-
-    def _toggle_expand(self,path):
-        """Swap one card between compact and fully-editable, in place, at
-        its existing row position. Its own row now grows/shrinks to its
-        real height (see _row_h_for), so every row after it shifts down
-        or up accordingly — every currently-visible card is repositioned
-        to its new spot rather than left where it was, which is what
-        actually prevents the overlap this used to cause."""
-        if path in self._expanded_paths: self._expanded_paths.discard(path)
-        else: self._expanded_paths.add(path)
-        old=self._card_by_path.pop(path,None)
-        if old:
-            self._sync_card_edits(path,old)
-            try: old.destroy()
-            except: pass
-        self._rebuild_cum_heights()
-        self._place_card_for(path)
-        self._reposition_visible_cards()
-        self._update_virtual_height()
-        self._reconcile_visible()
 
     def _update_progress(self,done=None,total=None,msg=None):
         t=total or len(self._all_paths)
@@ -1351,29 +1138,24 @@ class App(DnDCTk):
         for c in self._card_by_path.values():
             try: c.destroy()
             except: pass
-        self._card_by_path={}; self._path_idx={}; self._expanded_paths=set()
-        self._cum_heights=[0]
+        self._card_by_path={}; self._path_idx={}
         self._current_page=0
-        self._update_virtual_height()
         try: self._gen_scroll._parent_canvas.yview_moveto(0.0)
         except Exception: pass
         self._gen_count_lbl.configure(text="Generated Metadata (0)")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
-        if self._use_paged_grid():
-            self._page_lbl.configure(text="Page 1/1")
+        self._page_lbl.configure(text="Page 1/1")
 
     def _update_card(self,path):
-        """Refresh this path's card IF it's currently materialized.
-        With virtualization, most paths won't have a live widget at any
-        given moment (they're off-screen) — that's expected, not a bug:
+        """Refresh this path's card IF it's on the currently-shown page.
+        Most paths won't have a live widget at any given moment once a
+        batch is bigger than one page — that's expected, not a bug:
         self._results[path] already holds the fresh data (process_one
-        writes it before calling this), and _reconcile_visible() will
-        build the correct card, with correct content, the moment that row
-        scrolls into view. We deliberately do NOT force-create a widget
-        here, both because it's unnecessary and because doing so used to
-        let a stale/stopped batch's late callback resurrect a card for a
-        file that's no longer part of the app at all (the "stopped files
-        pop back up after Clear + new import" bug) — the _all_paths guard
+        writes it before calling this), and the card will show it the
+        moment that page is turned to. We deliberately do NOT force-build
+        a widget here, both because it's unnecessary and because doing so
+        used to let a stale/stopped batch's late callback resurrect a card
+        for a file no longer part of the app at all — the _all_paths guard
         below still protects the data side of that regardless."""
         if path not in self._all_paths: return
         card=self._card_by_path.get(path)
