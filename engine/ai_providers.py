@@ -22,51 +22,64 @@ def _post(url,body,headers,timeout=30):
         raise RuntimeError(f"Network error: {str(e.reason)}")
 
 def call_gemini(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
+    parts=[{"text":prompt}]
+    if path:
+        b64,mime=img_to_b64(path)
+        parts.insert(0,{"inline_data":{"mime_type":mime,"data":b64}})
     r=_post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-        {"contents":[{"parts":[{"inline_data":{"mime_type":mime,"data":b64}},{"text":prompt}]}],
+        {"contents":[{"parts":parts}],
          "generationConfig":{"temperature":0.3,"maxOutputTokens":2200}},
         {"Content-Type":"application/json"})
     try: return r["candidates"][0]["content"]["parts"][0]["text"]
     except: raise RuntimeError(f"Gemini parse error: {str(r)[:200]}")
 
+def _oa_style_content(path,prompt):
+    """Content list shared by every OpenAI-chat-format provider
+    (OpenRouter/OpenAI/Groq/Grok/Mistral) — image part omitted entirely
+    for a text-only call (Prompt-to-Prompt), so those providers never
+    see an image field they didn't ask for."""
+    content=[{"type":"text","text":prompt}]
+    if path:
+        b64,mime=img_to_b64(path)
+        content.insert(0,{"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}})
+    return content
+
+def _claude_style_content(path,prompt):
+    content=[{"type":"text","text":prompt}]
+    if path:
+        b64,mime=img_to_b64(path)
+        content.insert(0,{"type":"image","source":{"type":"base64","media_type":mime,"data":b64}})
+    return content
+
 def call_openrouter(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
     r=_post("https://openrouter.ai/api/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}",
          "HTTP-Referer":"https://metazone.app","X-Title":"Meta Zone"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"OpenRouter parse error: {str(r)[:200]}")
 
 def call_claude(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
     r=_post("https://api.anthropic.com/v1/messages",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image","source":{"type":"base64","media_type":mime,"data":b64}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_claude_style_content(path,prompt)}]},
         {"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"})
     try: return r["content"][0]["text"]
     except: raise RuntimeError(f"Claude parse error: {str(r)[:200]}")
 
 def call_openai(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
     r=_post("https://api.openai.com/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"OpenAI parse error: {str(r)[:200]}")
 
 def call_groq(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
     r=_post("https://api.groq.com/openai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"Groq parse error: {str(r)[:200]}")
@@ -75,21 +88,17 @@ def call_grok(key,model,path,prompt):
     """xAI's Grok — not to be confused with Groq (LPU inference cloud)
     above. Different company, different endpoint, different key format
     (xAI keys look like 'xai-...'; Groq keys look like 'gsk_...')."""
-    b64,mime=img_to_b64(path)
     r=_post("https://api.x.ai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"Grok parse error: {str(r)[:200]}")
 
 def call_mistral(key,model,path,prompt):
-    b64,mime=img_to_b64(path)
     r=_post("https://api.mistral.ai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[{"role":"user","content":[
-            {"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}},
-            {"type":"text","text":prompt}]}]},
+        {"model":model,"max_tokens":2200,"messages":[
+            {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"Mistral parse error: {str(r)[:200]}")
