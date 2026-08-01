@@ -85,7 +85,12 @@ class MetaResultCard(ctk.CTkFrame):
         self.grid_columnconfigure(0,weight=0,minsize=self.LEFT_PANEL_W)
         self.grid_columnconfigure(1,weight=40 if self._show_desc else 100)
         self.grid_columnconfigure(2,weight=60 if self._show_desc else 0)
-        self.grid_rowconfigure(0,weight=1)
+        # Row 0 (title/desc) is sized to its own content only; any leftover
+        # height (from the left panel needing more room than title/desc+
+        # keywords combined) goes to row 1 instead — otherwise it landed as
+        # blank space between the title/desc boxes and the keywords box.
+        self.grid_rowconfigure(0,weight=0)
+        self.grid_rowconfigure(1,weight=1)
 
         # ── Left panel: thumbnail, filename, filesize, API used, status,
         # Regenerate — everything about THIS file, nothing editable. Wrapped
@@ -493,67 +498,84 @@ class ModernDropdown(ctk.CTkFrame):
 
 
 class CompactEditCard(ctk.CTkFrame):
-    """The user-facing "Compact View" card — distinct from MetaResultCard's
-    internal large-batch performance-compact mode (which is read-only by
-    design). This one is genuinely editable: small thumbnail, small
-    title/description/keywords textboxes with live character/keyword
-    counters, and an icon-only Regenerate button — no bordered info box,
-    no full status chrome, nothing beyond what's needed to scan and
-    lightly edit a page of results quickly.
+    """The user-facing "Compact View" card. Deliberately NOT editable —
+    this is a scan-at-a-glance card: a bigger thumbnail (shorter edge
+    ~100px, aspect preserved) stacked with filename/filesize on the left;
+    on the right, a short snippet of title/description plus first-10
+    keywords, each with a count, then status and a Regenerate button.
+    No textboxes, no copy/paste chrome — that's what Expanded is for.
 
-    Exposes the same _boxes / get_result() surface as MetaResultCard, so
-    the app's existing edit-sync logic (_sync_card_edits) works on this
-    card unchanged."""
+    get_result() still exists (returning the untouched result dict) so
+    the app's save/export code works on this card unchanged even though
+    there's nothing here a person could have hand-edited."""
+    THUMB_MIN_EDGE=100
+
     def __init__(self,master,path,result,on_redo,mode="meta",
                  show_desc=True,request_thumb=None,**kw):
         super().__init__(master,fg_color=BG3,corner_radius=8,
             border_width=1,border_color=GLASS_BDR,**kw)
         self.path=path; self.result=dict(result); self.mode=mode
         self.show_desc=show_desc
-        self._boxes={}; self._counter_lbls={}
+        self._boxes=None  # no editable boxes on this card — _sync_card_edits no-ops
         self._build(on_redo,request_thumb)
 
     def _build(self,on_redo,request_thumb):
-        self.grid_columnconfigure(0,weight=1)
-        top=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
-        top.grid(row=0,column=0,sticky="ew",padx=8,pady=(8,4))
-        top.grid_columnconfigure(1,weight=1)
+        self.grid_columnconfigure(1,weight=1)
 
-        tf=ctk.CTkFrame(top,fg_color=BG4,corner_radius=6,width=36,height=36)
-        tf.grid(row=0,column=0,rowspan=2,padx=(0,6)); tf.grid_propagate(False)
-        self._tlbl=ctk.CTkLabel(tf,text="🖼",font=ctk.CTkFont("Segoe UI",14),
-            fg_color=BG4,text_color=TXT3,width=34,height=34,corner_radius=6)
+        # Left: thumbnail + filename + filesize, stacked.
+        left=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
+        left.grid(row=0,column=0,sticky="n",padx=(10,10),pady=10)
+
+        self._tlbl=ctk.CTkLabel(left,text="🖼",font=ctk.CTkFont("Segoe UI",22),
+            fg_color=BG4,text_color=TXT3,width=self.THUMB_MIN_EDGE,
+            height=self.THUMB_MIN_EDGE,corner_radius=6)
         self._tlbl.pack()
         if request_thumb:
-            request_thumb(self.path,self._tlbl,size=(34,34))
+            request_thumb(self.path,self._tlbl,min_edge=self.THUMB_MIN_EDGE)
 
         fname=os.path.basename(self.path)
-        ctk.CTkLabel(top,text=(fname[:22]+"…") if len(fname)>22 else fname,
-            font=ctk.CTkFont("Segoe UI",9),text_color=TXT3,
-            fg_color="transparent",anchor="w"
-        ).grid(row=0,column=1,rowspan=2,sticky="w")
+        ctk.CTkLabel(left,text=(fname[:20]+"…") if len(fname)>20 else fname,
+            font=ctk.CTkFont("Segoe UI",9,"bold"),text_color=TXT2,
+            fg_color="transparent",anchor="center"
+        ).pack(pady=(6,0))
+        try:
+            size_txt=format_filesize(self.path)
+        except Exception:
+            size_txt=""
+        ctk.CTkLabel(left,text=size_txt,font=ctk.CTkFont("Segoe UI",8),
+            text_color=TXT3,fg_color="transparent",anchor="center").pack()
 
-        self._redo_btn=ctk.CTkButton(top,text="⟳",width=26,height=26,
-            font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=BG4,hover_color=AMB_DIM,text_color=AMB_BTN,
-            corner_radius=6,command=on_redo)
-        self._redo_btn.grid(row=0,column=2,rowspan=2,padx=(4,0))
+        # Right: snippet rows + status + regenerate.
+        right=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
+        right.grid(row=0,column=1,sticky="new",padx=(0,10),pady=10)
+        right.grid_columnconfigure(0,weight=1)
+        self._snippet_lbls={}
 
         if self.mode=="prompt":
-            self._build_field(1,"prompt","Prompt",self.result.get("prompt",""),CYAN,70)
+            self._snippet_row(right,0,"prompt","Prompt",CYAN)
         else:
-            self._build_field(1,"title","Title",self.result.get("title",""),CYAN,46)
-            nxt=2
+            self._snippet_row(right,0,"title","Title",CYAN)
+            r=1
             if self.show_desc:
-                self._build_field(2,"desc","Description",self.result.get("desc",""),TXT2,46)
-                nxt=3
-            self._build_field(nxt,"kw","Keywords",self.result.get("kw",""),GRN,46)
+                self._snippet_row(right,1,"desc","Description",TXT2)
+                r=2
+            self._kw_row(right,r)
+            r+=1
+        self._status_lbl=ctk.CTkLabel(right,text="",font=ctk.CTkFont("Segoe UI",9,"bold"),
+            fg_color="transparent",anchor="w")
+        self._status_lbl.grid(row=10,column=0,sticky="w",pady=(4,4))
+        self._redo_btn=ctk.CTkButton(right,text="⟳  Regenerate",height=26,
+            font=ctk.CTkFont("Segoe UI",10,"bold"),
+            fg_color=BG4,hover_color=AMB_DIM,text_color=AMB_BTN,
+            corner_radius=6,command=on_redo)
+        self._redo_btn.grid(row=11,column=0,sticky="ew")
 
+        self._refresh_snippets()
         self._refresh_status()
 
-    def _build_field(self,row,key,label,value,color,height):
-        wrap=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
-        wrap.grid(row=row,column=0,sticky="ew",padx=8,pady=(0,4))
+    def _snippet_row(self,parent,row,key,label,color):
+        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
+        wrap.grid(row=row,column=0,sticky="ew",pady=(0,3))
         wrap.grid_columnconfigure(0,weight=1)
         hdr=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
         hdr.grid(row=0,column=0,sticky="ew")
@@ -563,30 +585,52 @@ class CompactEditCard(ctk.CTkFrame):
         counter=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont("Segoe UI",8),
             text_color=TXT3,fg_color="transparent")
         counter.grid(row=0,column=1,sticky="e")
-        self._counter_lbls[key]=counter
+        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",10),
+            text_color=color,fg_color="transparent",anchor="w",justify="left")
+        snippet.grid(row=1,column=0,sticky="ew")
+        self._snippet_lbls[key]=(snippet,counter)
 
-        box=ctk.CTkTextbox(wrap,height=height,font=ctk.CTkFont("Segoe UI",10),
-            fg_color=BG4,text_color=color,border_color=GLASS_BDR,border_width=1,
-            corner_radius=6,wrap="word")
-        box.grid(row=1,column=0,sticky="ew")
-        box.insert("1.0",value)
-        self._boxes[key]=box
-        self._update_counter(key)
-        box.bind("<KeyRelease>",lambda e,k=key:self._update_counter(k))
+    def _kw_row(self,parent,row):
+        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
+        wrap.grid(row=row,column=0,sticky="ew",pady=(0,3))
+        wrap.grid_columnconfigure(0,weight=1)
+        hdr=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
+        hdr.grid(row=0,column=0,sticky="ew")
+        hdr.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(hdr,text="Keywords",font=ctk.CTkFont("Segoe UI",8,"bold"),
+            text_color=TXT3,fg_color="transparent").grid(row=0,column=0,sticky="w")
+        counter=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont("Segoe UI",8),
+            text_color=TXT3,fg_color="transparent")
+        counter.grid(row=0,column=1,sticky="e")
+        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",10),
+            text_color=GRN,fg_color="transparent",anchor="w",justify="left",
+            wraplength=260)
+        snippet.grid(row=1,column=0,sticky="ew")
+        self._snippet_lbls["kw"]=(snippet,counter)
 
-    def _update_counter(self,key):
-        box=self._boxes.get(key); lbl=self._counter_lbls.get(key)
-        if not box or not lbl: return
-        text=box.get("1.0","end-1c")
-        if key=="kw":
-            n=len([k for k in text.split(",") if k.strip()])
-            lbl.configure(text=f"{n} kw")
-        else:
-            lbl.configure(text=f"{len(text)} ch")
+    def _first_words(self,text,n=8):
+        words=text.split()
+        snippet=" ".join(words[:n])
+        return snippet+("…" if len(words)>n else "")
+
+    def _refresh_snippets(self):
+        for key,(snippet_lbl,counter_lbl) in self._snippet_lbls.items():
+            text=self.result.get(key,"") or ""
+            if key=="kw":
+                kw_list=[k.strip() for k in text.split(",") if k.strip()]
+                snippet_lbl.configure(text=", ".join(kw_list[:10]) or "—")
+                counter_lbl.configure(text=f"{len(kw_list)} total")
+            else:
+                snippet_lbl.configure(text=self._first_words(text) or "—")
+                counter_lbl.configure(text=f"{len(text)} ch")
 
     def _refresh_status(self):
         st=self.result.get("status","")
-        color={"done":GRN,"failed":RED_BTN,"waiting":TXT3,"working":AMB_BTN}.get(st,TXT3)
+        label={"done":"✓ Done","failed":"✗ Failed","waiting":"Waiting…",
+               "working":"⟳ Generating…","stopped":"⏹ Stopped"}.get(st,st or "—")
+        color={"done":GRN,"failed":RED_BTN,"waiting":TXT3,
+               "working":AMB_BTN,"stopped":TXT3}.get(st,TXT3)
+        self._status_lbl.configure(text=label,text_color=color)
         try: self.configure(border_color=color if st in ("done","failed","working") else GLASS_BDR)
         except Exception: pass
 
@@ -595,19 +639,15 @@ class CompactEditCard(ctk.CTkFrame):
         purpose as MetaResultCard.apply_result: avoids destroying/
         recreating the card on every generation, redo, or retry."""
         self.result=dict(result)
-        keys=("prompt",) if self.mode=="prompt" else \
-             (("title","desc","kw") if self.show_desc else ("title","kw"))
-        for key in keys:
-            box=self._boxes.get(key)
-            if box:
-                box.delete("1.0","end")
-                val=self.result.get(key,"")
-                if val: box.insert("1.0",val)
-                self._update_counter(key)
+        self._refresh_snippets()
         self._refresh_status()
+
+    def get_result(self):
+        return dict(self.result)
 
     def set_waiting(self):
         self.result={"status":"waiting"}
+        self._refresh_snippets()
         self._refresh_status()
 
     def get_result(self):
