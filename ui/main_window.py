@@ -2,7 +2,7 @@
 (card list, virtualization, generation pipeline), Prompt-generation
 mode, and CSV export. Everything else (API keys, embedding) opens as
 its own popup window from here."""
-import os, csv, threading, datetime, queue, bisect
+import os, csv, threading, datetime, queue, bisect, time
 import tkinter
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar, IntVar
@@ -10,6 +10,8 @@ from tkinter import filedialog, messagebox, StringVar, BooleanVar, IntVar
 from core.constants import (APP_VERSION, PLATFORM_RULES, CONTENT_SUFFIXES,
     VECTOR_EXTS, VIDEO_EXTS, ALL_SUPPORTED_EXTS)
 from core.config import load_prefs, save_prefs
+from core import stats_db
+from ui.dashboard import DashboardPage
 from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
@@ -44,6 +46,7 @@ class App(DnDCTk):
         self._gen_epoch=0
         self._show_desc_mode=True
         self._task_mgr=TaskManager()
+        self._last_ai_provider=None; self._last_ai_model=None
         # View Settings — Expanded (1-4 user-selectable columns) or Compact
         # (columns auto-fit to the available width). Both render through
         # the single paginated-grid renderer — see _render_page below.
@@ -143,11 +146,190 @@ class App(DnDCTk):
     def _build_ui(self):
         self.grid_columnconfigure(0,weight=1)
         self.grid_rowconfigure(0,weight=0)  # title bar
-        self.grid_rowconfigure(1,weight=1)  # content
+        self.grid_rowconfigure(1,weight=1)  # shell (nav + pages)
         self.grid_rowconfigure(2,weight=0)  # status bar
         self._build_titlebar()
-        self._build_content()
+        self._build_shell()
         self._build_statusbar()
+
+    def _build_shell(self):
+        """Permanent global navigation (left) + a page area (right) that
+        holds every workspace stacked in the SAME grid cell, switched
+        with tkraise()/lower() — never destroyed/rebuilt, so background
+        processing (a running generation batch, an active Smart Workflow
+        run) is never interrupted by switching pages; only what's
+        displayed changes. Each nav item maps to one page; Metadata
+        Generator / Smart Workflow / Prompt Generator all share the SAME
+        underlying page (built by _build_content, unchanged) — clicking
+        between them just drives its existing workflow/mode toggles, so
+        none of that logic is duplicated."""
+        shell=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
+        shell.grid(row=1,column=0,sticky="nsew")
+        shell.grid_columnconfigure(0,weight=0)
+        shell.grid_columnconfigure(1,weight=1)
+        shell.grid_rowconfigure(0,weight=1)
+
+        self._page_area=ctk.CTkFrame(shell,fg_color=BG1,corner_radius=0)
+        self._page_area.grid(row=0,column=1,sticky="nsew")
+        self._page_area.grid_columnconfigure(0,weight=1)
+        self._page_area.grid_rowconfigure(0,weight=1)
+        self._pages={}
+        self._nav_btns={}
+        self._nav_active="dashboard"
+
+        self._build_global_nav(shell)     # needs self._pages to exist first (buttons wired below)
+        self._build_content()             # existing sidebar+main pair -> the "generator" page
+        self._build_dashboard_page()
+        self._build_simple_pages()
+
+        self._nav_to("dashboard")
+
+    def _build_global_nav(self,shell):
+        NAV_W=210
+        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W)
+        nav.grid(row=0,column=0,sticky="nsew"); nav.grid_propagate(False)
+        ctk.CTkLabel(nav,text="☰  MENU",font=ctk.CTkFont("Segoe UI",10,"bold"),
+            text_color=TXT3,fg_color=BG2).pack(anchor="w",padx=16,pady=(16,8))
+
+        items=[
+            ("dashboard","🏠","Dashboard",False),
+            ("smart","🚀","Smart Workflow",False),
+            ("metadata_gen","📝","Metadata Generator",False),
+            ("embedder","📦","Metadata Embedder",False),
+            ("prompt_gen","✨","Prompt Generator",False),
+            ("prompt_to_prompt","🔄","Prompt-to-Prompt",False),
+            ("ai_providers","🤖","AI Providers",False),
+            ("settings","⚙","Settings",False),
+            ("license","🔑","License",True),
+            ("help","❓","Help",True),
+        ]
+        for key,icon,label,coming_soon in items:
+            b=ctk.CTkButton(nav,text=f"{icon}   {label}",anchor="w",height=38,
+                font=ctk.CTkFont("Segoe UI",12,"bold" if not coming_soon else "normal"),
+                fg_color="transparent",hover_color=BG3,
+                text_color=(TXT3 if coming_soon else TXT2),
+                corner_radius=8,command=lambda k=key:self._nav_to(k))
+            b.pack(fill="x",padx=8,pady=1)
+            self._nav_btns[key]=b
+        self._nav_frame=nav
+
+    def _refresh_nav_highlight(self):
+        for key,b in self._nav_btns.items():
+            active=(key==self._nav_active)
+            b.configure(fg_color=GRN_DIM if active else "transparent",
+                        text_color=GRN if active else TXT2)
+
+    def _nav_to(self,key):
+        """The single switchboard for every workspace. Raising a page
+        never touches any other page's widgets or running work — a
+        Standard/Smart Workflow batch, or an Embed run, keeps going
+        exactly as it was regardless of which page this shows."""
+        self._nav_active=key
+        self._refresh_nav_highlight()
+        page=self._pages.get(key)
+        if page is None:
+            return
+        page.tkraise()
+        if key=="dashboard":
+            self._dashboard_page.refresh()
+        elif key=="smart":
+            self._set_workflow("smart")
+        elif key=="metadata_gen":
+            self._set_workflow("standard"); self._set_mode("meta")
+        elif key=="prompt_gen":
+            self._set_workflow("standard"); self._set_mode("prompt")
+
+    def _build_simple_pages(self):
+        """Embedder/AI Providers/Settings today open their existing,
+        fully-working dialogs (EmbedWindow, APIManagerWindow) rather than
+        being redrawn as inline pages yet — each nav item is still a real
+        working page with a real action, just not a full in-page
+        embed. License/Help are placeholders per spec (mockup shows both
+        as "Coming Soon"); Prompt-to-Prompt is flagged honestly as not
+        built yet rather than faked."""
+        specs=[
+            ("embedder","📦","Metadata Embedder",
+             "Batch-write generated metadata into your files via ExifTool.",
+             "📦  Open Metadata Embedder",self._open_embed),
+            ("ai_providers","🤖","AI Providers",
+             "Manage API keys and failover order for every supported provider.",
+             "🔑  Open API Key Manager",self._open_api_mgr),
+            ("settings","⚙","Settings",
+             "Theme, concurrency, and app-wide preferences.",
+             "⚙  Open Configuration",self._open_api_mgr),
+            ("license","🔑","License","Coming soon.",None,None),
+            ("help","❓","Help","Coming soon.",None,None),
+            ("prompt_to_prompt","🔄","Prompt-to-Prompt Generator",
+             "Not built yet — coming in the next update.",None,None),
+        ]
+        for key,icon,title,desc,btn_text,cmd in specs:
+            page=ctk.CTkFrame(self._page_area,fg_color=BG1,corner_radius=0)
+            page.grid(row=0,column=0,sticky="nsew")
+            wrap=ctk.CTkFrame(page,fg_color="transparent",corner_radius=0)
+            wrap.place(relx=0.5,rely=0.42,anchor="center")
+            ctk.CTkLabel(wrap,text=icon,font=ctk.CTkFont("Segoe UI",40),
+                fg_color=BG1,text_color=TXT2).pack()
+            ctk.CTkLabel(wrap,text=title,font=ctk.CTkFont("Segoe UI",20,"bold"),
+                fg_color=BG1,text_color=TXT).pack(pady=(10,4))
+            ctk.CTkLabel(wrap,text=desc,font=ctk.CTkFont("Segoe UI",12),
+                fg_color=BG1,text_color=TXT3).pack(pady=(0,16))
+            if cmd:
+                ctk.CTkButton(wrap,text=btn_text,height=42,width=240,
+                    font=ctk.CTkFont("Segoe UI",12,"bold"),
+                    fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
+                    corner_radius=8,command=cmd).pack()
+            self._pages[key]=page
+
+    def _build_dashboard_page(self):
+        self._dashboard_page=DashboardPage(self._page_area,self)
+        self._dashboard_page.grid(row=0,column=0,sticky="nsew")
+        self._pages["dashboard"]=self._dashboard_page
+
+    def _toggle_sidebar(self):
+        self._sb_collapsed=not self._sb_collapsed
+        if self._sb_collapsed:
+            self._sb_frame.grid_remove()
+            self._sb_expand_btn.place(relx=0.0,rely=0.5,anchor="w")
+        else:
+            self._sb_frame.grid()
+            self._sb_expand_btn.place_forget()
+
+    def _build_content(self):
+        content=ctk.CTkFrame(self._page_area,fg_color=BG1,corner_radius=0)
+        content.grid(row=0,column=0,sticky="nsew")
+        content.grid_columnconfigure(0,weight=0)  # sidebar
+        content.grid_columnconfigure(1,weight=1)  # main
+        content.grid_rowconfigure(0,weight=1)
+        self._sb_frame=ctk.CTkFrame(content,fg_color=BG2,corner_radius=0,width=268)
+        self._sb_frame.grid(row=0,column=0,sticky="nsew"); self._sb_frame.grid_propagate(False)
+        self._main=ctk.CTkFrame(content,fg_color=BG1,corner_radius=0)
+        self._main.grid(row=0,column=1,sticky="nsew")
+        self._main.grid_columnconfigure(0,weight=1)
+        self._main.grid_rowconfigure(1,weight=0)  # upload zone
+        self._main.grid_rowconfigure(2,weight=0)  # progress bar
+        self._main.grid_rowconfigure(3,weight=1)  # generated section
+        self._build_sidebar()
+        self._build_main()
+        self._pages["metadata_gen"]=content
+        self._pages["smart"]=content
+        self._pages["prompt_gen"]=content
+
+        # Collapsible control panel — collapsing frees the whole window
+        # for cards during a big generation run instead of losing 268px
+        # to settings you're not touching mid-batch.
+        self._sb_collapsed=False
+        self._sb_collapse_btn=ctk.CTkButton(self._sb_frame,text="⟨",width=18,height=64,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            corner_radius=0,command=self._toggle_sidebar)
+        self._sb_collapse_btn.place(relx=1.0,rely=0.5,anchor="e")
+        self._sb_expand_btn=ctk.CTkButton(self._main,text="⟩",width=18,height=64,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            corner_radius=0,command=self._toggle_sidebar)
+        # Not placed yet — only shown once the sidebar is actually collapsed.
+
+    # ── SIDEBAR ────────────────────────────────────────────────────
 
     def _build_titlebar(self):
         tb=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=54)
@@ -194,47 +376,6 @@ class App(DnDCTk):
             text_color=TXT2,fg_color=BG2).pack(anchor="e")
         ctk.CTkLabel(cr,text="© HASIBNIKON",font=ctk.CTkFont("Segoe UI",13,"bold"),
             text_color=TXT,fg_color=BG2).pack(anchor="e")
-
-    def _toggle_sidebar(self):
-        self._sb_collapsed=not self._sb_collapsed
-        if self._sb_collapsed:
-            self._sb_frame.grid_remove()
-            self._sb_expand_btn.place(relx=0.0,rely=0.5,anchor="w")
-        else:
-            self._sb_frame.grid()
-            self._sb_expand_btn.place_forget()
-
-    def _build_content(self):
-        content=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
-        content.grid(row=1,column=0,sticky="nsew")
-        content.grid_columnconfigure(0,weight=0)  # sidebar
-        content.grid_columnconfigure(1,weight=1)  # main
-        content.grid_rowconfigure(0,weight=1)
-        self._sb_frame=ctk.CTkFrame(content,fg_color=BG2,corner_radius=0,width=268)
-        self._sb_frame.grid(row=0,column=0,sticky="nsew"); self._sb_frame.grid_propagate(False)
-        self._main=ctk.CTkFrame(content,fg_color=BG1,corner_radius=0)
-        self._main.grid(row=0,column=1,sticky="nsew")
-        self._main.grid_columnconfigure(0,weight=1)
-        self._main.grid_rowconfigure(1,weight=0)  # upload zone
-        self._main.grid_rowconfigure(2,weight=0)  # progress bar
-        self._main.grid_rowconfigure(3,weight=1)  # generated section
-        self._build_sidebar()
-        self._build_main()
-
-        # Collapsible control panel — collapsing frees the whole window
-        # for cards during a big generation run instead of losing 268px
-        # to settings you're not touching mid-batch.
-        self._sb_collapsed=False
-        self._sb_collapse_btn=ctk.CTkButton(self._sb_frame,text="⟨",width=18,height=64,
-            font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,
-            corner_radius=0,command=self._toggle_sidebar)
-        self._sb_collapse_btn.place(relx=1.0,rely=0.5,anchor="e")
-        self._sb_expand_btn=ctk.CTkButton(self._main,text="⟩",width=18,height=64,
-            font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,
-            corner_radius=0,command=self._toggle_sidebar)
-        # Not placed yet — only shown once the sidebar is actually collapsed.
 
     # ── SIDEBAR ────────────────────────────────────────────────────
     def _build_sidebar(self):
@@ -486,6 +627,8 @@ class App(DnDCTk):
             self._adv_btn.configure(text="▶  Advanced Options")
 
     def _set_mode(self,mode):
+        if self.current_mode==mode:
+            return  # already here — do NOT clear/reset a possibly in-progress batch
         self.current_mode=mode
         if mode=="meta":
             self._meta_mode_btn.configure(fg_color=GRN,text_color=ABSOLUTE_BG)
@@ -503,6 +646,8 @@ class App(DnDCTk):
         self._render_page()
 
     def _set_workflow(self,mode):
+        if self.workflow_var.get()==mode:
+            return  # already here — avoid redundant raise/refresh churn
         self.workflow_var.set(mode)
         active=mode=="smart"
         self._wf_standard_btn.configure(
@@ -1283,6 +1428,7 @@ class App(DnDCTk):
             messagebox.showerror("No API Keys","Open 'Configuration'."); return
         self.ai_running=True; self.ai_stop_flag=False; self._ai_paused=False
         self._gen_epoch+=1; epoch=self._gen_epoch
+        self._gen_start_time=time.time()
         self._gen_btn.configure(state="disabled",text="⟳  Generating…")
         self._pause_btn.pack(side="left",padx=(0,4),before=self._gen_btn)
         self._stop_btn.pack(side="left",padx=(0,5),before=self._gen_btn)
@@ -1341,6 +1487,7 @@ class App(DnDCTk):
                     raw,provider,model_id,key_idx=call_with_failover(path,prompt,self.prefs,
                         status_cb=lambda msg:self.after(0,lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
                     if epoch!=self._gen_epoch: return
+                    self._last_ai_provider,self._last_ai_model=provider,model_id
                     model_used=f"⚙ {provider} · {model_label(provider,model_id)}" + \
                                (f" ({key_idx})" if key_idx else "")
                     if mode=="meta":
@@ -1454,6 +1601,13 @@ class App(DnDCTk):
         self.set_status(f"● Done — {done} generated · {failed} failed",
                         GRN if failed==0 else AMB_BTN)
         self._update_progress(done=done,total=total)
+        seconds=time.time()-getattr(self,"_gen_start_time",time.time())
+        kind="prompt_generation" if self.current_mode=="prompt" else "metadata_generation"
+        if done>0:
+            stats_db.record(kind,"completed",count=done,api_requests=done,seconds=seconds,
+                             detail=f"{'Prompts' if kind=='prompt_generation' else 'Files'}: {done}")
+        if failed>0:
+            stats_db.record(kind,"failed",count=failed,api_requests=failed)
         # Auto-save CSV
         if done>0: self._auto_save_csv()
 
