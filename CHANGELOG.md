@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.4 — Smart Workflow (Beta)
+
+A brand-new, fully separate opt-in workflow — Standard Workflow is
+untouched and stays the default. Toggle between them from the sidebar;
+switching doesn't destroy or rebuild either mode's widgets (raised/
+lowered over the same area instead), and files are imported the normal
+way in either mode.
+
+Seven automatic stages, each with its own progress indicator:
+1. **Preview Generation** — every image gets a temporary ~1024px-long-
+   side preview before anything else happens; originals are never
+   touched until embedding, and previews are deleted at the end.
+2. **AI Quality Inspection** — every preview is checked for blur, AI
+   artifacts, deformed faces/hands, missing/duplicate body parts,
+   logos/watermarks/signatures, visible text, and copyright-sensitive
+   content, and classified 🟢 Good / 🟡 Needs Review / 🔴 Rejected with
+   a confidence score. Nothing is permanently rejected at this stage —
+   classification only.
+3. **Image Selection** — shows the Good/Review/Rejected counts and lets
+   you choose Good Only / Good + Needs Review / All Images before
+   metadata generation runs.
+4. **Metadata Generation** — reuses the exact same prompt-building,
+   parsing, and AI-failover engine as Standard Workflow (no duplicated
+   logic), sending only the preview, never the original file.
+5. **Metadata Optimization** — scores each result (missing/short
+   keywords, missing description, flagged trademark/copyright terms,
+   excess punctuation) into a Metadata Quality percentage.
+6. **Embedding** — one toggle: auto-embed into the originals (reusing
+   the same embed helper Standard Workflow's Embed window uses) or
+   skip straight to CSV-only.
+7. **Organization & Cleanup** — sorts originals into Ready Upload /
+   Needs Review / Rejected folders, writes the CSV and a log, deletes
+   the temporary preview cache, and produces an exportable TXT
+   processing report (totals, scores, timing, provider used, errors).
+
+**Interruption recovery**: progress is checkpointed to disk after every
+stage. If Meta Zone closes mid-run, the next launch detects it and asks
+to resume from the last completed stage. Verified via a scripted stop-
+mid-generation-then-resume test — and along the way, found and fixed
+two real bugs in this before it ever shipped: the checkpoint was
+recording the stage that had *just finished* instead of the next one to
+run, which would have silently re-run (and re-billed) that stage on
+every resume; and generated metadata/scores were never actually being
+saved to the checkpoint at all, which would have silently lost all
+generated results on any resume past Stage 4. Both fixed and confirmed
+with a test asserting zero redundant AI calls and zero data loss across
+a real interruption.
+
+Performance: never loads the whole batch into RAM, uses the same
+bounded worker-pool pattern as Standard Workflow's generation (not
+unbounded threads), and is designed against 5,000+ image batches —
+verified for correctness end-to-end on small batches with mocked AI
+calls; full-scale throughput/memory behavior hasn't been exercised yet
+on a real multi-thousand-file batch.
+
 ## v0.3.2 — progress bars
 
 - Every progress bar in the app (Generate tab, Import dialog, Embed
