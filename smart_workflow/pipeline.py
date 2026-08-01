@@ -19,6 +19,7 @@ from engine.parser import (parse_meta, sanitize_text_punctuation,
     sanitize_keywords_punctuation, enforce_single_keywords,
     _strip_copyright_keywords, smart_trim, dedupe_content_phrase)
 from core.constants import CONTENT_SUFFIXES, VECTOR_EXTS, VIDEO_EXTS
+from core import stats_db
 
 from smart_workflow.preview import cache_dir_for, generate_previews, cleanup_cache
 from smart_workflow.inspector import inspect_one
@@ -437,6 +438,16 @@ class SmartWorkflowPipeline:
         cleanup_cache(self.cache_dir)
         self._emit_stage("complete")
 
+        stats_db.record("smart_workflow_run", "completed",
+            count=summary["metadata_generated"],
+            meta_score=summary["avg_score"] if summary["metadata_generated"] else None,
+            api_requests=summary["api_requests"], api_requests_saved=summary["api_requests_saved"],
+            seconds=summary["elapsed_seconds"],
+            detail=f"Project: {os.path.basename(self.folder.rstrip(os.sep)) or self.folder}")
+        if summary["embedded"] > 0:
+            stats_db.record("embedding", "completed", count=summary["embedded"],
+                             detail="Smart Workflow")
+
         if self.on_complete:
             self.on_complete(summary, report_path)
 
@@ -450,6 +461,11 @@ class SmartWorkflowPipeline:
         avg_score = (sum(scores) / len(scores)) if scores else 0
         elapsed_s = time.time() - self._start_time if self._start_time else 0
         m, s = divmod(int(elapsed_s), 60)
+        selected = len(self._selected_paths())
+        # "Saved" = generation calls avoided because Stage 2/3 filtered
+        # an image out before Stage 4 ever sent it to the AI.
+        requests_saved = max(len(self.paths) - selected, 0)
+        requests = len(self.paths) + selected  # inspection calls + generation calls
         return {
             "total": len(self.paths),
             "processed": len(self.results),
@@ -458,6 +474,9 @@ class SmartWorkflowPipeline:
             "embedded": embedded,
             "avg_score": avg_score,
             "elapsed": f"{m}m {s}s",
+            "elapsed_seconds": elapsed_s,
+            "api_requests": requests,
+            "api_requests_saved": requests_saved,
             "providers": ", ".join(sorted(self.providers_used)) or "—",
             "errors": len(self.errors),
             "error_list": self.errors,
