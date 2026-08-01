@@ -12,6 +12,7 @@ from core.constants import (APP_VERSION, PLATFORM_RULES, CONTENT_SUFFIXES,
 from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
+from prompt_to_prompt.panel import PromptToPromptPanel
 from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
@@ -180,6 +181,7 @@ class App(DnDCTk):
         self._build_global_nav(shell)     # needs self._pages to exist first (buttons wired below)
         self._build_content()             # existing sidebar+main pair -> the "generator" page
         self._build_dashboard_page()
+        self._build_prompt_to_prompt_page()
         self._build_simple_pages()
 
         self._nav_to("dashboard")
@@ -259,8 +261,6 @@ class App(DnDCTk):
              "⚙  Open Configuration",self._open_api_mgr),
             ("license","🔑","License","Coming soon.",None,None),
             ("help","❓","Help","Coming soon.",None,None),
-            ("prompt_to_prompt","🔄","Prompt-to-Prompt Generator",
-             "Not built yet — coming in the next update.",None,None),
         ]
         for key,icon,title,desc,btn_text,cmd in specs:
             page=ctk.CTkFrame(self._page_area,fg_color=BG1,corner_radius=0)
@@ -284,6 +284,11 @@ class App(DnDCTk):
         self._dashboard_page=DashboardPage(self._page_area,self)
         self._dashboard_page.grid(row=0,column=0,sticky="nsew")
         self._pages["dashboard"]=self._dashboard_page
+
+    def _build_prompt_to_prompt_page(self):
+        self._p2p_page=PromptToPromptPanel(self._page_area,self)
+        self._p2p_page.grid(row=0,column=0,sticky="nsew")
+        self._pages["prompt_to_prompt"]=self._p2p_page
 
     def _toggle_sidebar(self):
         self._sb_collapsed=not self._sb_collapsed
