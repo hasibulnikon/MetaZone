@@ -20,7 +20,8 @@ class ImportProgressDialog(ctk.CTkToplevel):
             text_color=TXT2,fg_color=BG2)
         self._lbl.grid(row=1,column=0,padx=24,pady=(0,10))
         self._bar=ctk.CTkProgressBar(self,progress_color=GRN,fg_color=BG3,
-            height=10,corner_radius=5,width=320)
+            border_width=1,border_color=GLASS_BDR,
+            height=14,corner_radius=7,width=320)
         self._bar.grid(row=2,column=0,padx=24,pady=(0,20)); self._bar.set(0)
         self.update_idletasks()
         w,h=380,130
