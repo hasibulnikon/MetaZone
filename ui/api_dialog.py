@@ -265,7 +265,18 @@ class APIManagerWindow(ctk.CTkToplevel):
         ctk.CTkButton(inner,text=f"🔑  Get API Key from {p}",height=38,
             font=ctk.CTkFont("Segoe UI",11),fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=8,
-            command=lambda:self._open_url(cfg["key_url"])).pack(fill="x",padx=18,pady=(0,18))
+            command=lambda:self._open_url(cfg["key_url"])).pack(fill="x",padx=18,pady=(0,10))
+        aa_row=ctk.CTkFrame(inner,fg_color=BG2,corner_radius=0)
+        aa_row.pack(fill="x",padx=18,pady=(0,18))
+        aa_row.grid_columnconfigure((0,1),weight=1)
+        ctk.CTkButton(aa_row,text="Activate All",height=34,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),fg_color=BG3,hover_color=GRN_DIM,
+            text_color=TXT2,border_width=1,border_color=GLASS_BDR,corner_radius=8,
+            command=lambda:self._activate_all(p)).grid(row=0,column=0,sticky="ew",padx=(0,4))
+        ctk.CTkButton(aa_row,text="Deactivate All",height=34,
+            font=ctk.CTkFont("Segoe UI",11,"bold"),fg_color=BG3,hover_color=RED_DIM,
+            text_color=TXT2,border_width=1,border_color=GLASS_BDR,corner_radius=8,
+            command=lambda:self._deactivate_all(p)).grid(row=0,column=1,sticky="ew",padx=(4,0))
         # RIGHT
         ctk.CTkLabel(self._rp,text="STORED KEYS",font=ctk.CTkFont("Segoe UI",10,"bold"),
             text_color=TXT2,fg_color=BG1).pack(anchor="w",padx=16,pady=(16,8))
@@ -333,6 +344,16 @@ class APIManagerWindow(ctk.CTkToplevel):
     def _copy(self,kv): self.clipboard_clear(); self.clipboard_append(kv)
     def _activate(self,p,i): self.prefs["ai_keys"][p][i]["active"]=True; save_prefs(self.prefs); self._switch(p)
     def _deactivate(self,p,i): self.prefs["ai_keys"][p][i]["active"]=False; save_prefs(self.prefs); self._switch(p)
+    def _activate_all(self,p):
+        keys=self.prefs.get("ai_keys",{}).get(p,[])
+        if not keys: return
+        for k in keys: k["active"]=True
+        save_prefs(self.prefs); self._switch(p)
+    def _deactivate_all(self,p):
+        keys=self.prefs.get("ai_keys",{}).get(p,[])
+        if not keys: return
+        for k in keys: k["active"]=False
+        save_prefs(self.prefs); self._switch(p)
     def _del(self,p,i):
         if not messagebox.askyesno("Delete","Delete this key?",parent=self): return
         self.prefs["ai_keys"][p].pop(i); save_prefs(self.prefs); self._switch(p)
@@ -340,7 +361,10 @@ class APIManagerWindow(ctk.CTkToplevel):
         if not key: messagebox.showwarning("Empty","Paste a key first.",parent=self); return
         keys=self.prefs["ai_keys"][p]
         if any(k["key"]==key for k in keys): messagebox.showinfo("Duplicate","Already saved.",parent=self); return
-        for k in keys: k["active"]=False
+        # A new key joins as active WITHOUT touching any other key's active
+        # state — this used to deactivate every other active key for the
+        # provider, silently wiping out the whole failover set the moment
+        # someone added one more key.
         keys.append({"key":key,"active":True})
         save_prefs(self.prefs); self._switch(p)
     def _save_model(self,p,label):
