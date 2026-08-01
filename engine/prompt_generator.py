@@ -117,6 +117,61 @@ def build_meta_prompt(title_c, desc_c, kw_n, custom_prompt="",
     )
 
 
+def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avoid=None):
+    """Prompt-to-Prompt Generator: takes ONE existing prompt and asks for
+    `count` new variations inspired by it. Text-only — no image — so this
+    is sent through call_with_failover(None, prompt, prefs) rather than
+    with a file path."""
+    creativity_note = {
+        "Low": "Stay close to the original — small wording changes, synonym "
+               "swaps, minor detail shifts. Same core idea, same composition.",
+        "Medium": "Meaningful variety — vary the setting, angle, subject "
+                  "details, or mood while keeping the same general concept "
+                  "and niche as the original.",
+        "High": "Bold, imaginative variations — explore different angles, "
+                "settings, subjects, or interpretations of the same underlying "
+                "theme/niche. Still usable for the same commercial purpose, "
+                "just far less literal than the original.",
+    }.get(creativity, "Meaningful variety — vary the details while keeping the same niche.")
+
+    style_note = {
+        "Maintain Original": "Match the original prompt's own tone, length, and level of detail.",
+        "Commercial": "Polished, commercially safe, broadly marketable — the kind of prompt "
+                      "a stock content buyer would want. Avoid anything edgy or niche-limiting.",
+        "Creative": "More artistic and evocative language — mood, atmosphere, and visual "
+                    "flair, while staying usable.",
+        "Minimal": "Short, concise prompts — the essential subject and setting only, no "
+                   "excess description.",
+        "Highly Detailed": "Long, richly detailed prompts covering subject, setting, lighting, "
+                           "color palette, composition, and mood.",
+    }.get(style, "Match the original prompt's own tone and length.")
+
+    avoid_note = ""
+    if avoid:
+        sample = "; ".join(avoid[:8])
+        avoid_note = (f"\n- These prompts already exist — do NOT repeat them or produce "
+                       f"near-duplicates of: {sample}")
+
+    return (
+        f"You are an expert AI image-generation prompt writer working from an existing "
+        f"prompt, creating new variations inspired by it for a stock-content creator.\n\n"
+        f"ORIGINAL PROMPT:\n\"{original_prompt.strip()}\"\n\n"
+        f"Generate EXACTLY {count} new, DIFFERENT prompts inspired by the original.\n\n"
+        f"Creativity level ({creativity}): {creativity_note}\n"
+        f"Style ({style}): {style_note}\n\n"
+        f"Rules:\n"
+        f"- Every prompt must remain commercially useful stock content.\n"
+        f"- Keep the same general niche/subject category as the original.\n"
+        f"- No two prompts may be duplicates or near-duplicates of each other.\n"
+        f"- No repeated sentence structures — vary how each prompt opens and is phrased.\n"
+        f"- No trademarked names, brand names, or copyrighted character names.\n"
+        f"- Each prompt must read as a complete, well-formed, polished prompt on its own."
+        f"{avoid_note}\n\n"
+        f"Output format: EXACTLY {count} lines, one prompt per line, nothing else — "
+        f"no numbering, no bullets, no blank lines, no preamble, no markdown."
+    )
+
+
 def build_prompt_prompt(max_words, styles, custom_prompt=""):
     style_str = ", ".join(styles) if styles else "realistic photography"
     extra = f"\n- MANDATORY: {custom_prompt.strip()}" if custom_prompt.strip() else ""
