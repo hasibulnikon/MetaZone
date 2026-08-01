@@ -159,8 +159,8 @@ class EmbedWindow(ctk.CTkToplevel):
         prog.grid(row=5,column=0,sticky="ew",pady=(0,4))
         prog.grid_columnconfigure(0,weight=1)
         self._embed_prog_bar=ctk.CTkProgressBar(prog,progress_color=GRN,fg_color=BG3,
-            height=6,corner_radius=3)
-        self._embed_prog_bar.grid(row=0,column=0,sticky="ew",padx=10,pady=(10,4))
+            border_width=1,border_color=GLASS_BDR,height=14,corner_radius=7)
+        self._embed_prog_bar.grid(row=0,column=0,sticky="ew",padx=10,pady=(12,6))
         self._embed_prog_bar.set(0)
         self._embed_counts_lbl=ctk.CTkLabel(prog,
             text="0 succeeded  ·  0 failed  ·  0 not found",
