@@ -3,18 +3,19 @@ vector/video files via ExifTool."""
 import os, sys, csv, re, subprocess, threading, time
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
-from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one
+from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one, set_window_icon
 from core import stats_db
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,LOG_BG,ABSOLUTE_BG,AMB,AMB2)
 from ui.dnd import DND_AVAILABLE, DND_FILES
 from workers.task_manager import TaskManager
 
-class EmbedWindow(ctk.CTkToplevel):
-    def __init__(self,parent,csv_path=None,folder_path=None):
-        super().__init__(parent); self.title("Embed Metadata")
-        self.configure(fg_color=BG1); self.resizable(True,True)
-        self.grab_set()
+class EmbedContent(ctk.CTkFrame):
+    """The actual Embed Metadata body — usable either embedded directly in
+    a nav page or wrapped in a popup Toplevel. See APIManagerContent for
+    why this split exists."""
+    def __init__(self,parent,csv_path=None,folder_path=None,fg_color=None):
+        super().__init__(parent,fg_color=fg_color or BG1,corner_radius=0)
         self.csv_rows=[]; self.csv_headers=[]; self.embed_running=False
         self.col_combos={}  # set for real inside _build(); defensive default so
                              # a partial/failed build can never raise the
@@ -31,13 +32,6 @@ class EmbedWindow(ctk.CTkToplevel):
         self._task_mgr=TaskManager()
         self._rename_lock=threading.Lock()
         self._build()
-        # Widened to fit the right-hand Activity Log panel. Height matches
-        # the form's natural content height (~546px measured) plus a small
-        # margin — it used to be hardcoded to 640px, which left a dead gap
-        # below the Start Embedding button.
-        self._center(1180,570)
-        self.minsize(900,560)
-        self.protocol("WM_DELETE_WINDOW",self.destroy)
         # Auto-load whatever was just generated, so "generate then embed" is
         # a one-click flow instead of re-browsing for the CSV and folder.
         if folder_path:
@@ -46,29 +40,11 @@ class EmbedWindow(ctk.CTkToplevel):
                 fg_color=GRN_DIM,text_color=GRN)
         if csv_path: self._do_load_csv(csv_path)
 
-    def _center(self,w,h):
-        self.update_idletasks()
-        x=self.master.winfo_x()+(self.master.winfo_width()-w)//2
-        y=self.master.winfo_y()+(self.master.winfo_height()-h)//2
-        self.geometry(f"{w}x{h}+{x}+{y}")
-
     def _build(self):
-        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(1,weight=1)
-        # Header
-        hdr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=50)
-        hdr.grid(row=0,column=0,columnspan=2,sticky="ew"); hdr.grid_propagate(False)
-        hdr.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(hdr,text="📋  Embed Metadata",
-            font=ctk.CTkFont("Segoe UI",14,"bold"),text_color=TXT,fg_color=BG2
-        ).grid(row=0,column=0,sticky="w",padx=16,pady=13)
-        ctk.CTkButton(hdr,text="✕",width=32,height=32,fg_color="transparent",
-            hover_color=RED_DIM,text_color=TXT3,corner_radius=6,
-            command=self.destroy).grid(row=0,column=1,padx=10)
-
-        # Body (left column) + Activity Log (right column)
         self.grid_columnconfigure(0,weight=1); self.grid_columnconfigure(1,weight=0,minsize=260)
+        self.grid_rowconfigure(0,weight=1)
         body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
-        body.grid(row=1,column=0,sticky="nsew",padx=12,pady=12)
+        body.grid(row=0,column=0,sticky="nsew",padx=12,pady=12)
         body.grid_columnconfigure(0,weight=1)
 
         # 1. CSV row (also a drop target)
@@ -170,7 +146,7 @@ class EmbedWindow(ctk.CTkToplevel):
 
         # Activity Log — right-hand panel (matches the old v1.2 layout)
         log_panel=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0)
-        log_panel.grid(row=1,column=1,sticky="nsew",padx=(0,12),pady=12)
+        log_panel.grid(row=0,column=1,sticky="nsew",padx=(0,12),pady=12)
         log_panel.grid_columnconfigure(0,weight=1); log_panel.grid_rowconfigure(1,weight=1)
         lp_hdr=ctk.CTkFrame(log_panel,fg_color=BG2,corner_radius=0)
         lp_hdr.grid(row=0,column=0,sticky="ew",padx=10,pady=(10,6))
@@ -448,4 +424,41 @@ class EmbedWindow(ctk.CTkToplevel):
         # fast instead of running one exiftool process at a time.
         self._task_mgr.run_batch(self.csv_rows,process_row,max_workers=6,on_all_done=_finish)
 
+
+class EmbedWindow(ctk.CTkToplevel):
+    """Thin popup wrapper around EmbedContent — title bar and close button
+    only; everything else lives in the shared content frame."""
+    def __init__(self,parent,csv_path=None,folder_path=None):
+        super().__init__(parent); self.title("Embed Metadata")
+        self.configure(fg_color=BG1); self.resizable(True,True)
+        set_window_icon(self)
+        self.grab_set()
+        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(1,weight=1)
+
+        hdr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=50)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        hdr.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(hdr,text="📋  Embed Metadata",
+            font=ctk.CTkFont("Segoe UI",14,"bold"),text_color=TXT,fg_color=BG2
+        ).grid(row=0,column=0,sticky="w",padx=16,pady=13)
+        ctk.CTkButton(hdr,text="✕",width=32,height=32,fg_color="transparent",
+            hover_color=RED_DIM,text_color=TXT3,corner_radius=6,
+            command=self.destroy).grid(row=0,column=1,padx=10)
+
+        self.content=EmbedContent(self,csv_path=csv_path,folder_path=folder_path)
+        self.content.grid(row=1,column=0,sticky="nsew")
+
+        # Widened to fit the right-hand Activity Log panel. Height matches
+        # the form's natural content height (~546px measured) plus a small
+        # margin — it used to be hardcoded to 640px, which left a dead gap
+        # below the Start Embedding button.
+        self._center(1180,610)
+        self.minsize(900,600)
+        self.protocol("WM_DELETE_WINDOW",self.destroy)
+
+    def _center(self,w,h):
+        self.update_idletasks()
+        x=self.master.winfo_x()+(self.master.winfo_width()-w)//2
+        y=self.master.winfo_y()+(self.master.winfo_height()-h)//2
+        self.geometry(f"{w}x{h}+{x}+{y}")
 
