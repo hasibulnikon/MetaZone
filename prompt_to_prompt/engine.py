@@ -50,6 +50,30 @@ def dedupe(prompts):
     return out
 
 
+_PREAMBLE_RE = re.compile(
+    r"^(here (are|is)|sure|certainly|okay|ok,|note:|these (are|prompts)|"
+    r"below (are|is)|i've|i have|hope this)",
+    re.IGNORECASE)
+
+
+def _clean_prompts(prompts):
+    """Drops lines that clearly aren't a real generated prompt: leading
+    meta-commentary the model sometimes adds despite instructions not to
+    ('Here are 10 variations:'), and fragments too short to be a usable
+    image prompt (a genuine one is essentially never a single 2-3 word
+    sentence — that shape is what a token-limit truncation cutting a
+    batch off mid-list looks like)."""
+    out = []
+    for p in prompts:
+        words = p.split()
+        if len(words) < 4:
+            continue
+        if _PREAMBLE_RE.match(p.strip()):
+            continue
+        out.append(p)
+    return out
+
+
 class PromptToPromptEngine:
     def __init__(self, app):
         self.app = app
@@ -82,52 +106,88 @@ class PromptToPromptEngine:
         threading.Thread(target=self._run, args=(original_prompt, count, creativity, style),
                           daemon=True).start()
 
-    def _run(self, original_prompt, count, creativity, style):
-        start_time = time.time()
-        batches = []
-        remaining = count
-        while remaining > 0:
-            n = min(BATCH_SIZE, remaining)
-            batches.append(n)
-            remaining -= n
-
-        lock = threading.Lock()
-        done_batches = [0]
-        total_batches = len(batches)
-        collected = []
+    def _run_batches(self, original_prompt, sizes, creativity, style, collected, lock,
+                      progress_base, progress_total):
+        """Runs one wave of batches concurrently and returns once all of
+        them are done. Each batch is given whatever's in `collected` at
+        the moment IT starts (not a fixed snapshot from before the wave),
+        so later batches in the same wave still benefit from earlier
+        ones finishing first."""
+        done_counter = [0]
 
         def worker(batch_n, i):
             self._wait_while_paused()
             if self.stop_flag:
                 return
+            with lock:
+                avoid_snapshot = list(collected[-20:])
             prompt = build_prompt_to_prompt_prompt(
-                original_prompt, batch_n, creativity, style, avoid=collected[:20])
+                original_prompt, batch_n, creativity, style, avoid=avoid_snapshot)
             try:
-                raw, provider, model_id, key_idx = call_with_failover(None, prompt, self.app.prefs)
+                raw, provider, model_id, key_idx = call_with_failover(
+                    None, prompt, self.app.prefs, max_tokens=4000)
                 self.app._last_ai_provider, self.app._last_ai_model = provider, model_id
-                parsed = _parse_prompts(raw, batch_n)
+                parsed = _clean_prompts(_parse_prompts(raw, batch_n))
                 with lock:
                     collected.extend(parsed)
-                    done_batches[0] += 1
+                    done_counter[0] += 1
             except Exception as e:
                 with lock:
                     self.errors.append(str(e)[:150])
-                    done_batches[0] += 1
+                    done_counter[0] += 1
             if self.on_progress:
-                self.on_progress(done_batches[0], total_batches,
-                                  f"Generating… batch {done_batches[0]}/{total_batches}")
+                self.on_progress(progress_base + done_counter[0], progress_total,
+                                  f"Generating… batch {progress_base + done_counter[0]}/{progress_total}")
 
-        ev = threading.Event()
         concurrency = max(1, min(6, int(getattr(self.app, "ai_concurrency_var", None)
                                           and self.app.ai_concurrency_var.get() or 3)))
-        self.app._task_mgr.run_batch(batches, worker, max_workers=concurrency, on_all_done=ev.set)
+        ev = threading.Event()
+        self.app._task_mgr.run_batch(sizes, worker, max_workers=concurrency, on_all_done=ev.set)
         ev.wait()
+        return done_counter[0]
 
+    def _run(self, original_prompt, count, creativity, style):
+        start_time = time.time()
+        lock = threading.Lock()
+        collected = []
+
+        def make_batches(n):
+            out = []
+            while n > 0:
+                b = min(BATCH_SIZE, n)
+                out.append(b); n -= b
+            return out
+
+        batches = make_batches(count)
+        total_batches_est = len(batches)  # for the progress label; may grow below
+        self._run_batches(original_prompt, batches, creativity, style, collected, lock,
+                           0, total_batches_est)
+
+        # Concurrent batches inevitably start before earlier ones have
+        # populated the avoid-list, so near-duplicate variations get
+        # collapsed hard by dedupe() — worst at low creativity, where the
+        # model is explicitly asked to stay close to the original wording.
+        # Rather than accept an under-delivered result, top up the
+        # shortfall with additional avoid-list-aware batches (now that
+        # `collected` actually has content to avoid) — bounded so a
+        # genuinely exhausted topic can't loop forever.
         self.results = dedupe(collected)
+        extra_rounds = 0
+        while len(self.results) < count and extra_rounds < 4 and not self.stop_flag:
+            shortfall = count - len(self.results)
+            topup_batches = make_batches(shortfall)
+            total_batches_est += len(topup_batches)
+            done_so_far = len(batches) + sum(1 for _ in range(extra_rounds))  # rough, label-only
+            self._run_batches(original_prompt, topup_batches, creativity, style, collected, lock,
+                               done_so_far, total_batches_est)
+            self.results = dedupe(collected)
+            extra_rounds += 1
+
+        self.results = self.results[:count] if count else self.results
         seconds = time.time() - start_time
         if self.results:
             stats_db.record("prompt_to_prompt", "completed", count=len(self.results),
-                             api_requests=total_batches, seconds=seconds,
+                             api_requests=total_batches_est, seconds=seconds,
                              detail=f"Prompts: {len(self.results)}")
         if self.errors and not self.results:
             if self.on_error:
