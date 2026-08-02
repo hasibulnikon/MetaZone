@@ -13,7 +13,7 @@ from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
-from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label
+from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
@@ -35,6 +35,7 @@ class App(DnDCTk):
         super().__init__()
         self.title("Meta Zone"); self.configure(fg_color=BG1)
         self.resizable(True,True)
+        set_window_icon(self)
         self.prefs=load_prefs()
 
         self._all_paths=[]; self._results={}
@@ -111,8 +112,15 @@ class App(DnDCTk):
     def _online_loop(self):
         def _c():
             online=check_online()
-            self.after(0,lambda:self._set_online(online))
-            self.after(8000,self._online_loop)
+            # Both the state update AND the next reschedule must happen on
+            # the main/Tk thread — self.after() is NOT thread-safe, and
+            # calling it directly from this background thread (as before)
+            # was the actual root cause of the app randomly freezing/going
+            # unresponsive after running for a while: every 8s cycle had a
+            # chance to corrupt Tcl's internal event-loop state from the
+            # wrong thread, and eventually the next keypress or click would
+            # hang because the interpreter was already wedged.
+            self.after(0,lambda:(self._set_online(online),self.after(8000,self._online_loop)))
         threading.Thread(target=_c,daemon=True).start()
 
     def _set_online(self,online):
@@ -187,33 +195,67 @@ class App(DnDCTk):
         self._nav_to("dashboard")
 
     def _build_global_nav(self,shell):
-        NAV_W=210
-        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W)
+        NAV_W_EXPANDED=210
+        NAV_W_COLLAPSED=64
+        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W_COLLAPSED)
         nav.grid(row=0,column=0,sticky="nsew"); nav.grid_propagate(False)
-        ctk.CTkLabel(nav,text="☰  MENU",font=ctk.CTkFont("Segoe UI",10,"bold"),
-            text_color=TXT3,fg_color=BG2).pack(anchor="w",padx=16,pady=(16,8))
+        self._nav_w_expanded=NAV_W_EXPANDED
+        self._nav_w_collapsed=NAV_W_COLLAPSED
+        self._nav_expanded=False
 
+        hdr=ctk.CTkFrame(nav,fg_color=BG2,corner_radius=0)
+        hdr.pack(fill="x",padx=8,pady=(16,8))
+        self._nav_toggle_btn=ctk.CTkButton(hdr,text="☰",width=32,height=32,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=8,
+            command=self._toggle_nav)
+        self._nav_toggle_btn.pack(side="left")
+
+        # Exact requested order: Dashboard, Meta Generator, Smart Workflow,
+        # Meta Embedder, Prompt Generator, Prompt to Prompt, API Manager,
+        # Settings, License, Help.
         items=[
             ("dashboard","🏠","Dashboard",False),
+            ("metadata_gen","📝","Meta Generator",False),
             ("smart","🚀","Smart Workflow",False),
-            ("metadata_gen","📝","Metadata Generator",False),
-            ("embedder","📦","Metadata Embedder",False),
+            ("embedder","📦","Meta Embedder",False),
             ("prompt_gen","✨","Prompt Generator",False),
-            ("prompt_to_prompt","🔄","Prompt-to-Prompt",False),
-            ("ai_providers","🤖","AI Providers",False),
+            ("prompt_to_prompt","🔄","Prompt to Prompt",False),
+            ("ai_providers","🤖","API Manager",False),
             ("settings","⚙","Settings",False),
             ("license","🔑","License",True),
             ("help","❓","Help",True),
         ]
+        self._nav_items=items
         for key,icon,label,coming_soon in items:
-            b=ctk.CTkButton(nav,text=f"{icon}   {label}",anchor="w",height=38,
-                font=ctk.CTkFont("Segoe UI",12,"bold" if not coming_soon else "normal"),
+            b=ctk.CTkButton(nav,text=icon,anchor="center",height=38,width=NAV_W_COLLAPSED-16,
+                font=ctk.CTkFont("Segoe UI",14,"bold" if not coming_soon else "normal"),
                 fg_color="transparent",hover_color=BG3,
                 text_color=(TXT3 if coming_soon else TXT2),
                 corner_radius=8,command=lambda k=key:self._nav_to(k))
             b.pack(fill="x",padx=8,pady=1)
             self._nav_btns[key]=b
         self._nav_frame=nav
+        self._apply_nav_labels()
+
+    def _toggle_nav(self):
+        """Menu button expands the vertical icon strip to icon+label width,
+        or collapses it back — the nav itself is ALWAYS the vertical icon
+        strip; expanding never turns it into anything else."""
+        self._nav_expanded=not self._nav_expanded
+        w=self._nav_w_expanded if self._nav_expanded else self._nav_w_collapsed
+        self._nav_frame.configure(width=w)
+        for b in self._nav_btns.values():
+            b.configure(width=w-16 if not self._nav_expanded else 0)
+        self._apply_nav_labels()
+
+    def _apply_nav_labels(self):
+        for key,icon,label,coming_soon in self._nav_items:
+            b=self._nav_btns[key]
+            if self._nav_expanded:
+                b.configure(text=f"{icon}   {label}",anchor="w")
+            else:
+                b.configure(text=icon,anchor="center")
 
     def _refresh_nav_highlight(self):
         for key,b in self._nav_btns.items():
@@ -234,12 +276,39 @@ class App(DnDCTk):
         page.tkraise()
         if key=="dashboard":
             self._dashboard_page.refresh()
-        elif key=="smart":
+            self._dash_ctrl_frame.grid()
+        else:
+            self._dash_ctrl_frame.grid_remove()
+        if key=="smart":
             self._set_workflow("smart")
         elif key=="metadata_gen":
             self._set_workflow("standard"); self._set_mode("meta")
         elif key=="prompt_gen":
             self._set_workflow("standard"); self._set_mode("prompt")
+
+    def _stop_all(self):
+        """Pauses every running workflow in place — never closes anything,
+        never discards progress. Standard Workflow's own Stop already
+        preserves partial results; Smart Workflow's own Stop already saves
+        resumable state — this just triggers both of those, plus an
+        Embed run in progress, whichever are actually active."""
+        stopped_any=False
+        if getattr(self,"ai_running",False):
+            self.ai_stop_flag=True; stopped_any=True
+        sw=getattr(getattr(self,"_smart_frame",None),"pipeline",None)
+        if sw and getattr(sw,"stage",None) and sw.stage!="complete":
+            sw.stop(); stopped_any=True
+        if stopped_any:
+            self.set_status("⏹  Stop All — every running workflow was paused.",AMB_BTN)
+        else:
+            self.set_status("Nothing is currently running.",TXT3)
+
+    def _refresh_to_default_view(self):
+        """Refreshes the CURRENT window back to its default view — never
+        touches any running process. On Dashboard this re-pulls the
+        latest stats; it does not stop, pause, or restart anything."""
+        self._dashboard_page.refresh()
+        self.set_status("⟳  Refreshed.",TXT2)
 
     def _build_simple_pages(self):
         """Embedder/AI Providers/Settings today open their existing,
@@ -249,20 +318,36 @@ class App(DnDCTk):
         embed. License/Help are placeholders per spec (mockup shows both
         as "Coming Soon"); Prompt-to-Prompt is flagged honestly as not
         built yet rather than faked."""
-        specs=[
-            ("embedder","📦","Metadata Embedder",
-             "Batch-write generated metadata into your files via ExifTool.",
-             "📦  Open Metadata Embedder",self._open_embed),
-            ("ai_providers","🤖","AI Providers",
-             "Manage API keys and failover order for every supported provider.",
-             "🔑  Open API Key Manager",self._open_api_mgr),
-            ("settings","⚙","Settings",
-             "Theme, concurrency, and app-wide preferences.",
-             "⚙  Open Configuration",self._open_api_mgr),
+        from ui.embed_window import EmbedContent
+        from ui.api_dialog import APIManagerContent
+
+        inline_specs=[
+            ("embedder","📦","Meta Embedder"),
+            ("ai_providers","🤖","API Manager"),
+            ("settings","⚙","Settings"),
+        ]
+        for key,icon,title in inline_specs:
+            page=ctk.CTkFrame(self._page_area,fg_color=BG1,corner_radius=0)
+            page.grid(row=0,column=0,sticky="nsew")
+            page.grid_columnconfigure(0,weight=1); page.grid_rowconfigure(1,weight=1)
+            hdr=ctk.CTkFrame(page,fg_color=BG1,corner_radius=0)
+            hdr.grid(row=0,column=0,sticky="ew",padx=24,pady=(20,10))
+            ctk.CTkLabel(hdr,text=f"{icon}  {title}",font=ctk.CTkFont("Segoe UI",20,"bold"),
+                fg_color=BG1,text_color=TXT).pack(anchor="w")
+            if key=="embedder":
+                content=EmbedContent(page,fg_color=BG1)
+            elif key=="ai_providers":
+                content=APIManagerContent(page,self.prefs,mode="api",fg_color=BG1)
+            else:
+                content=APIManagerContent(page,self.prefs,mode="settings",fg_color=BG1)
+            content.grid(row=1,column=0,sticky="nsew",padx=24,pady=(0,20))
+            self._pages[key]=page
+
+        placeholder_specs=[
             ("license","🔑","License","Coming soon.",None,None),
             ("help","❓","Help","Coming soon.",None,None),
         ]
-        for key,icon,title,desc,btn_text,cmd in specs:
+        for key,icon,title,desc,btn_text,cmd in placeholder_specs:
             page=ctk.CTkFrame(self._page_area,fg_color=BG1,corner_radius=0)
             page.grid(row=0,column=0,sticky="nsew")
             wrap=ctk.CTkFrame(page,fg_color="transparent",corner_radius=0)
@@ -273,11 +358,6 @@ class App(DnDCTk):
                 fg_color=BG1,text_color=TXT).pack(pady=(10,4))
             ctk.CTkLabel(wrap,text=desc,font=ctk.CTkFont("Segoe UI",12),
                 fg_color=BG1,text_color=TXT3).pack(pady=(0,16))
-            if cmd:
-                ctk.CTkButton(wrap,text=btn_text,height=42,width=240,
-                    font=ctk.CTkFont("Segoe UI",12,"bold"),
-                    fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
-                    corner_radius=8,command=cmd).pack()
             self._pages[key]=page
 
     def _build_dashboard_page(self):
@@ -340,9 +420,23 @@ class App(DnDCTk):
         tb=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=54)
         tb.grid(row=0,column=0,sticky="ew"); tb.grid_propagate(False)
         tb.grid_columnconfigure(2,weight=1)
-        ctk.CTkLabel(tb,text="✦",font=ctk.CTkFont("Segoe UI",16,"bold"),
-            fg_color=BG4,text_color=GRN,corner_radius=8,width=28,height=28
-        ).grid(row=0,column=0,padx=(16,8),pady=13)
+        logo_img=None
+        try:
+            from core.utils import _icon_paths
+            _,png=_icon_paths()
+            if png:
+                from PIL import Image
+                logo_img=ctk.CTkImage(Image.open(png),size=(28,28))
+        except Exception:
+            logo_img=None
+        if logo_img is not None:
+            self._logo_img_ref=logo_img  # keep alive
+            ctk.CTkLabel(tb,text="",image=logo_img,fg_color=BG2
+            ).grid(row=0,column=0,padx=(16,8),pady=13)
+        else:
+            ctk.CTkLabel(tb,text="✦",font=ctk.CTkFont("Segoe UI",16,"bold"),
+                fg_color=BG4,text_color=GRN,corner_radius=8,width=28,height=28
+            ).grid(row=0,column=0,padx=(16,8),pady=13)
         ctk.CTkLabel(tb,text="Meta Zone",font=ctk.CTkFont("Segoe UI",18,"bold"),
             text_color=TXT,fg_color=BG2).grid(row=0,column=1,sticky="w")
         mid=ctk.CTkFrame(tb,fg_color=BG2,corner_radius=0)
@@ -351,32 +445,37 @@ class App(DnDCTk):
             text_color=GRN,fg_color=GRN_DIM,corner_radius=20,padx=8,pady=2
         ).pack(side="left")
 
-        # "Metadata AI" looks like a button (same shape/size family as the
-        # Embed button next to it) but is inert — it's just showing which
-        # mode is currently active, not something to click. Embed opens
-        # the Embed window, styled to visually pair with it: dark/gray +
-        # white text here, green + black text there (matching the
-        # Generate/Configuration button look).
-        ctk.CTkButton(mid,text="Metadata AI",width=112,height=30,
+        # "Metadata AI" / "Embed" used to sit here permanently — removed.
+        # Metadata AI's own controls now only appear inside the Metadata
+        # Generator page, and Embed only inside the Embedder page.
+
+        # Dashboard-only controls: Stop All, then Refresh, then the online
+        # indicator (in that left-to-right order) — only visible while the
+        # Dashboard page is active (toggled from _nav_to).
+        dash_ctrl=ctk.CTkFrame(tb,fg_color=BG2,corner_radius=0)
+        dash_ctrl.grid(row=0,column=3,padx=(0,10),pady=12)
+        self._stopall_btn=ctk.CTkButton(dash_ctrl,text="⏹  Stop All",width=96,height=30,
             font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG4,hover_color=BG4,text_color=TXT,
-            border_width=0,corner_radius=8,
-            cursor="arrow",state="disabled",text_color_disabled=TXT
-        ).pack(side="left",padx=(14,4))
-        ctk.CTkButton(mid,text="📋  Embed",width=112,height=30,
+            fg_color=RED_DIM,hover_color=RED_BTN_H,text_color=RED_BTN,
+            border_width=0,corner_radius=8,command=self._stop_all)
+        self._stopall_btn.pack(side="left",padx=(0,6))
+        self._refresh_btn=ctk.CTkButton(dash_ctrl,text="⟳  Refresh",width=96,height=30,
             font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
-            border_width=0,corner_radius=8,
-            command=self._open_embed
-        ).pack(side="left")
+            fg_color=BG3,hover_color=BG4,text_color=TXT2,
+            border_width=0,corner_radius=8,command=self._refresh_to_default_view)
+        self._refresh_btn.pack(side="left")
+        self._dash_ctrl_frame=dash_ctrl
+        self._dash_ctrl_widgets=[self._stopall_btn,self._refresh_btn]
+
         of=ctk.CTkFrame(tb,fg_color=BG3,corner_radius=20)
-        of.grid(row=0,column=3,padx=(0,16),pady=12)
+        of.grid(row=0,column=4,padx=(0,16),pady=12)
         self._online_dot=ctk.CTkLabel(of,text="●",font=ctk.CTkFont("Segoe UI",16),
             text_color=GRN,fg_color=BG3); self._online_dot.pack(side="left",padx=(12,4),pady=4)
         self._online_lbl=ctk.CTkLabel(of,text="Online",font=ctk.CTkFont("Segoe UI",12,"bold"),
             text_color=TXT2,fg_color=BG3); self._online_lbl.pack(side="left",padx=(0,12),pady=4)
+        self._dash_ctrl_frame.grid_remove()  # hidden until Dashboard is active
         cr=ctk.CTkFrame(tb,fg_color=BG2,corner_radius=0)
-        cr.grid(row=0,column=4,padx=(0,18),sticky="e")
+        cr.grid(row=0,column=5,padx=(0,18),sticky="e")
         ctk.CTkLabel(cr,text="All Rights Reserved By",font=ctk.CTkFont("Segoe UI",10,"bold"),
             text_color=TXT2,fg_color=BG2).pack(anchor="e")
         ctk.CTkLabel(cr,text="© HASIBNIKON",font=ctk.CTkFont("Segoe UI",13,"bold"),
@@ -393,8 +492,10 @@ class App(DnDCTk):
         inner.grid(row=1,column=0,sticky="nsew"); inner.grid_columnconfigure(0,weight=1)
         self._sb=inner
 
-        # API config
-        ctk.CTkButton(inner,text="🔑  Configuration",
+        # API config — quick popup shortcut (the full inline page version
+        # lives behind the nav's API Manager item; this is the compact
+        # popup for quick access while working in Metadata Generator).
+        ctk.CTkButton(inner,text="🔑  API Manager",
             font=ctk.CTkFont("Segoe UI",12,"bold"),
             fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,
             height=38,corner_radius=8,command=self._open_api_mgr
@@ -403,29 +504,11 @@ class App(DnDCTk):
             text_color=TXT3,fg_color=BG2); self._api_lbl.pack(anchor="w",padx=12,pady=(0,4))
         self._refresh_api_lbl()
 
-        # Workflow Mode — Standard is always the default at launch; Smart
-        # Workflow is opt-in and lives entirely in its own module (see
-        # smart_workflow/), raised over the results area only when picked
-        # — the image import row above stays shared between both modes,
-        # and Standard's own code path is never touched by switching.
+        # Workflow selection now lives ONLY in the global nav (Smart
+        # Workflow / Meta Generator are separate nav items) — no more
+        # side-by-side toggle buttons duplicating that choice here.
         self._div(inner)
         self.workflow_var=StringVar(value="standard")
-        wf=ctk.CTkFrame(inner,fg_color=BG3,corner_radius=8)
-        wf.pack(fill="x",padx=10,pady=(4,8))
-        wf.grid_columnconfigure(0,weight=1); wf.grid_columnconfigure(1,weight=1)
-        self._wf_standard_btn=ctk.CTkButton(wf,text="Standard Workflow",height=34,
-            font=ctk.CTkFont("Segoe UI",10,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=6,
-            command=lambda:self._set_workflow("standard"))
-        self._wf_standard_btn.grid(row=0,column=0,sticky="ew",padx=(4,2),pady=4)
-        self._wf_smart_btn=ctk.CTkButton(wf,text="⚡ Smart Workflow",height=34,
-            font=ctk.CTkFont("Segoe UI",10,"bold"),
-            fg_color="transparent",hover_color=BG4,text_color=TXT3,corner_radius=6,
-            command=lambda:self._set_workflow("smart"))
-        self._wf_smart_btn.grid(row=0,column=1,sticky="ew",padx=(2,4),pady=4)
-        ctk.CTkLabel(inner,text="BETA — automates preview, quality check,\ngeneration, embedding & filing in one run",
-            font=ctk.CTkFont("Segoe UI",9),text_color=TXT3,fg_color=BG2,justify="left"
-        ).pack(anchor="w",padx=12,pady=(0,4))
 
         # Concurrency slider
         self._div(inner)
@@ -445,21 +528,8 @@ class App(DnDCTk):
             command=lambda v:(self._conc_lbl.configure(text=f"{int(v)}x"),self._save_settings())
         ).pack(fill="x",pady=(3,0))
 
-        # Mode switch
-        self._div(inner)
-        mf=ctk.CTkFrame(inner,fg_color=BG3,corner_radius=8)
-        mf.pack(fill="x",padx=10,pady=(4,8))
-        mf.grid_columnconfigure(0,weight=1); mf.grid_columnconfigure(1,weight=1)
-        self._meta_mode_btn=ctk.CTkButton(mf,text="≡  METADATA",height=34,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=6,
-            command=lambda:self._set_mode("meta"))
-        self._meta_mode_btn.grid(row=0,column=0,sticky="ew",padx=(4,2),pady=4)
-        self._prompt_mode_btn=ctk.CTkButton(mf,text="✨  PROMPT",height=34,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color="transparent",hover_color=BG4,text_color=TXT3,corner_radius=6,
-            command=lambda:self._set_mode("prompt"))
-        self._prompt_mode_btn.grid(row=0,column=1,sticky="ew",padx=(2,4),pady=4)
+        # Metadata/Prompt mode is now chosen by which nav item you're on
+        # (Meta Generator vs Prompt Generator) — no in-sidebar toggle.
 
         # Metadata settings
         self._meta_sf=ctk.CTkFrame(inner,fg_color=BG2,corner_radius=0)
@@ -636,13 +706,9 @@ class App(DnDCTk):
             return  # already here — do NOT clear/reset a possibly in-progress batch
         self.current_mode=mode
         if mode=="meta":
-            self._meta_mode_btn.configure(fg_color=GRN,text_color=ABSOLUTE_BG)
-            self._prompt_mode_btn.configure(fg_color="transparent",text_color=TXT3)
             self._prompt_sf.pack_forget()
             self._meta_sf.pack(fill="x",before=self._sl_anchor)
         else:
-            self._prompt_mode_btn.configure(fg_color=GRN,text_color=ABSOLUTE_BG)
-            self._meta_mode_btn.configure(fg_color="transparent",text_color=TXT3)
             self._meta_sf.pack_forget()
             self._prompt_sf.pack(fill="x",before=self._sl_anchor)
         self._clear_results()
@@ -655,12 +721,6 @@ class App(DnDCTk):
             return  # already here — avoid redundant raise/refresh churn
         self.workflow_var.set(mode)
         active=mode=="smart"
-        self._wf_standard_btn.configure(
-            fg_color="transparent" if active else GRN,
-            text_color=TXT3 if active else ABSOLUTE_BG)
-        self._wf_smart_btn.configure(
-            fg_color=GRN if active else "transparent",
-            text_color=ABSOLUTE_BG if active else TXT3)
         if active:
             self._smart_frame.tkraise()
             self._smart_frame.refresh_file_count()
@@ -833,7 +893,11 @@ class App(DnDCTk):
             self._api_lbl.configure(text="⚠ No active keys",text_color=RED_BTN)
 
     def _open_api_mgr(self):
-        APIManagerWindow(self,self.prefs,on_close=self._refresh_api_lbl)
+        APIManagerWindow(self,self.prefs,on_close=self._refresh_api_lbl,mode="api")
+
+    def _open_settings(self):
+        # Theme lives ONLY here now — nowhere else in the app opens it.
+        APIManagerWindow(self,self.prefs,on_close=self._refresh_api_lbl,mode="settings")
 
     # ── MAIN AREA ──────────────────────────────────────────────────
     def _build_main(self):
@@ -1046,6 +1110,14 @@ class App(DnDCTk):
         self._smart_frame=SmartWorkflowPanel(self._main,self)
         self._smart_frame.grid(row=0,column=0,rowspan=4,sticky="nsew")
         self._smart_frame.lower()
+        # Smart Workflow's panel is raised OVER every Standard-Workflow
+        # widget registered above (ws, main, gen, etc.) — since it's on
+        # top, drops landing on it never reached those widgets, and the
+        # panel itself was never registered as its own drop target. That's
+        # the "drag & drop does nothing / stays at 0 files loaded while on
+        # Smart Workflow" bug. Register the panel and its scrollable body
+        # too, routed through the exact same _on_drop -> _add_images path.
+        self._register_drop_targets([self._smart_frame,self._smart_frame._body])
         self.after(400,self._check_smart_resume)
 
     def _open_embed(self):
@@ -1133,6 +1205,12 @@ class App(DnDCTk):
             self._update_desc_toggle_lock()
             self._render_page()
         self._update_dropzone_visibility()
+        # Keep Smart Workflow's "N files loaded" label live even though
+        # its widgets are never rebuilt — without this it stayed stuck at
+        # "0 files loaded" after a drop while Smart Workflow was the
+        # visible panel, even once the drop itself worked.
+        if hasattr(self,"_smart_frame"):
+            self._smart_frame.refresh_file_count()
 
     def _import_with_progress(self,paths):
         """Record every path in small batches (so the event loop is never
@@ -1160,6 +1238,8 @@ class App(DnDCTk):
                 self._update_desc_toggle_lock()
                 self._render_page()
                 dlg.finish()
+                if hasattr(self,"_smart_frame"):
+                    self._smart_frame.refresh_file_count()
         self.after(10,add_batch)
 
     def _make_blank_card(self,path):
@@ -1430,7 +1510,7 @@ class App(DnDCTk):
         if self.ai_running: messagebox.showwarning("Busy","Already generating."); return
         if not self._all_paths: messagebox.showerror("No Images","Add images first."); return
         if not get_active_keys(self.prefs):
-            messagebox.showerror("No API Keys","Open 'Configuration'."); return
+            messagebox.showerror("No API Keys","Open 'API Manager'."); return
         self.ai_running=True; self.ai_stop_flag=False; self._ai_paused=False
         self._gen_epoch+=1; epoch=self._gen_epoch
         self._gen_start_time=time.time()
@@ -1761,9 +1841,12 @@ class App(DnDCTk):
         self.sb_status.configure(text=msg,text_color=color or TXT3)
 
     def _check_et(self):
-        et=find_exiftool()
-        if et: self.sb_et.configure(text="ExifTool · ready",text_color=GRN)
-        else: self.sb_et.configure(text="ExifTool · missing",text_color=RED_BTN)
+        def _c():
+            et=find_exiftool()
+            self.after(0,lambda:self.sb_et.configure(
+                text="ExifTool · ready" if et else "ExifTool · missing",
+                text_color=GRN if et else RED_BTN))
+        threading.Thread(target=_c,daemon=True).start()
 
 
 if __name__=='__main__':
