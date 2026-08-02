@@ -31,19 +31,34 @@ CHART_LABELS = {
 }
 
 
-def _stat_card(parent, icon, value, label, sub, color):
+def _stat_card(parent, icon, value, label, sub, color, corner=False):
     card = ctk.CTkFrame(parent, fg_color=GLASS, corner_radius=10,
         border_width=1, border_color=GLASS_BDR)
-    ctk.CTkLabel(card, text=icon, font=ctk.CTkFont("Segoe UI", 16),
-        fg_color=color, text_color=TXT, corner_radius=8, width=34, height=34
-    ).pack(anchor="w", padx=14, pady=(14, 8))
+    # Non-interactive by design — nothing in here is clickable, so give it
+    # the plain arrow cursor rather than anything implying interaction.
+    card.configure(cursor="arrow")
+    icon_lbl = ctk.CTkLabel(card, text=icon, font=ctk.CTkFont("Segoe UI", 16),
+        fg_color=color, text_color=TXT, corner_radius=8, width=34, height=34)
+    icon_lbl.pack(anchor="w", padx=14, pady=(14, 8))
+    if corner:
+        # Idle/Empty-style status text sits in the top-right corner of the
+        # card instead of floating as a caption underneath the value.
+        corner_lbl = ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 9, "bold"),
+            text_color=TXT3, fg_color=GLASS, anchor="e")
+        corner_lbl.place(relx=1.0, x=-12, y=14, anchor="ne")
+        card._corner_lbl = corner_lbl
+    else:
+        card._corner_lbl = None
     ctk.CTkLabel(card, text=value, font=ctk.CTkFont("Segoe UI", 22, "bold"),
         text_color=TXT, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14)
     ctk.CTkLabel(card, text=label, font=ctk.CTkFont("Segoe UI", 11),
         text_color=TXT2, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14, pady=(0, 4))
-    if sub:
-        ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 9),
-            text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14, pady=(0, 12))
+    if not corner:
+        if sub:
+            ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 9),
+                text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14, pady=(0, 12))
+        else:
+            ctk.CTkLabel(card, text="", fg_color=GLASS, height=8).pack()
     else:
         ctk.CTkLabel(card, text="", fg_color=GLASS, height=8).pack()
     return card
@@ -111,7 +126,8 @@ class DashboardPage(ctk.CTkFrame):
                  ("queue", "📋", "In Queue", "#8b5cf6"),
                  ("score", "★", "Avg. Metadata Score", CYAN)]
         for i, (key, icon, label, color) in enumerate(specs):
-            card = _stat_card(today_row, icon, "0", label, "", color)
+            corner = key in ("running", "queue")
+            card = _stat_card(today_row, icon, "0", label, "", color, corner=corner)
             card.grid(row=0, column=i, sticky="nsew", padx=4)
             self._today_cards[key] = card
 
@@ -143,22 +159,45 @@ class DashboardPage(ctk.CTkFrame):
             self._ai_rows[key] = _kv_row(self._ai_box, label, "—", i)
 
         self._insights_box = _section(row2, "Productivity Insights", "🏆")
-        self._insights_box.grid(row=0, column=2, sticky="nsew", padx=6)
         self._insight_rows = {}
         insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
                           ("requests_saved", "Est. Requests Saved"),
                           ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
         for i, (key, label) in enumerate(insight_items):
             self._insight_rows[key] = _kv_row(self._insights_box, label, "—", i)
+        # Hidden for now — replaced on-screen by the Quick Actions grid
+        # below, which now occupies this exact spot (columns 2-3 of this
+        # row). Refresh logic keeps running so the numbers stay current
+        # for whenever this comes back.
 
         self._sys_box = _section(row2, "System Status")
-        self._sys_box.grid(row=0, column=3, sticky="nsew", padx=(6, 0))
         self._sys_rows = {}
         sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
                      ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
                      ("smart", "Smart Workflow")]
         for i, (key, label) in enumerate(sys_items):
             self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
+        # Also hidden — see note above.
+
+        # Quick Actions now sits where Productivity Insights + System
+        # Status used to be (columns 2-3 of row2), sized to their exact
+        # combined footprint, as a 2-column x 3-row grid.
+        qa_box = ctk.CTkFrame(row2, fg_color="transparent", corner_radius=0)
+        qa_box.grid(row=0, column=2, columnspan=2, sticky="nsew", padx=(6, 0))
+        qa_box.grid_columnconfigure((0, 1), weight=1)
+        for r in range(3): qa_box.grid_rowconfigure(r, weight=1)
+        actions = [
+            ("🚀  Smart Workflow", "#7c3aed", lambda: self.app._nav_to("smart")),
+            ("📝  Meta Generator", "#2563eb", lambda: self.app._nav_to("metadata_gen")),
+            ("📦  Meta Embedder", GRN, lambda: self.app._nav_to("embedder")),
+            ("✨  Prompt Generator", "#d97706", lambda: self.app._nav_to("prompt_gen")),
+            ("🔄  Prompt-to-Prompt", "#0891b2", lambda: self.app._nav_to("prompt_to_prompt")),
+            ("⏮  Resume Last Project", "#334155", self._resume_last_project),
+        ]
+        for i, (text, color, cmd) in enumerate(actions):
+            ctk.CTkButton(qa_box, text=text, height=48, font=ctk.CTkFont("Segoe UI", 11, "bold"),
+                fg_color=color, hover_color=color, text_color=TXT, corner_radius=8,
+                command=cmd).grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
 
         # Recent Activity + Chart
         row3 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
@@ -185,25 +224,6 @@ class DashboardPage(ctk.CTkFrame):
             highlightthickness=0)
         self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 12))
 
-        # Quick Actions
-        ctk.CTkLabel(body, text="Quick Actions", font=ctk.CTkFont("Segoe UI", 13, "bold"),
-            text_color=TXT, fg_color=BG1, anchor="w").pack(anchor="w", padx=4, pady=(4, 8))
-        qa = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        qa.pack(fill="x", pady=(0, 20))
-        for i in range(3): qa.grid_columnconfigure(i, weight=1, uniform="qa")
-        actions = [
-            ("🚀  Start Smart Workflow", "#7c3aed", lambda: self.app._nav_to("smart")),
-            ("📝  Generate Metadata", "#2563eb", lambda: self.app._nav_to("metadata_gen")),
-            ("📦  Open Embedder", GRN, lambda: self.app._nav_to("embedder")),
-            ("✨  Generate Prompts", "#d97706", lambda: self.app._nav_to("prompt_gen")),
-            ("🔄  Prompt-to-Prompt", "#0891b2", lambda: self.app._nav_to("prompt_to_prompt")),
-            ("⏮  Resume Last Project", "#334155", self._resume_last_project),
-        ]
-        for i, (text, color, cmd) in enumerate(actions):
-            ctk.CTkButton(qa, text=text, height=48, font=ctk.CTkFont("Segoe UI", 12, "bold"),
-                fg_color=color, hover_color=color, text_color=TXT, corner_radius=8,
-                command=cmd).grid(row=i // 3, column=i % 3, sticky="nsew", padx=4, pady=4)
-
     # ── refresh ─────────────────────────────────────────────────────
     def _auto_refresh(self):
         if self.winfo_viewable():
@@ -222,9 +242,16 @@ class DashboardPage(ctk.CTkFrame):
     def _set_card(self, key, value, sub=""):
         card = self._today_cards[key]
         children = card.winfo_children()
-        children[1].configure(text=str(value))  # value label
-        if len(children) > 3:
-            children[3].configure(text=sub)
+        # Value is always the first packed CTkLabel after the icon; the
+        # corner label (if any) is place()d, not packed, so it's excluded
+        # from this ordering automatically.
+        packed = [w for w in children if str(w.winfo_manager()) == "pack"]
+        if len(packed) >= 2:
+            packed[1].configure(text=str(value))  # value label
+        if card._corner_lbl is not None:
+            card._corner_lbl.configure(text=sub)
+        elif len(packed) > 3:
+            packed[3].configure(text=sub)
 
     def _refresh_today(self):
         t = stats_db.today_summary()
