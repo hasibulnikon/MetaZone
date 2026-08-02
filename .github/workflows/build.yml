@@ -103,6 +103,7 @@ jobs:
           )
 
           if ($icon_arg) { $pyinstaller_args += $icon_arg }
+          if (Test-Path "icon.ico") { $pyinstaller_args += "--add-data=icon.ico;." }
           if (Test-Path "icon.png") { $pyinstaller_args += "--add-data=icon.png;." }
 
           $pyinstaller_args += "app.py"
