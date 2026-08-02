@@ -1,0 +1,36 @@
+{
+  "platform": "Adobe Stock",
+  "title_len": 130,
+  "desc_len": 200,
+  "kw_count": 49,
+  "prompt_words": 60,
+  "single_keywords": false,
+  "avoid_copyright": false,
+  "concurrency": 3,
+  "prefix_text": "",
+  "suffix_text": "",
+  "include_desc": true,
+  "content_type": "Auto Detect",
+  "view_mode": "compact",
+  "grid_cols": 1,
+  "page_size": 50,
+  "ai_keys": {
+    "Gemini": [],
+    "Mistral": [
+      {
+        "key": "AAA",
+        "active": true
+      },
+      {
+        "key": "BBB",
+        "active": true
+      },
+      {
+        "key": "CCC",
+        "active": true
+      }
+    ]
+  },
+  "ai_models": {},
+  "last_smart_folder": "/home/claude/sw_test"
+}
