@@ -45,6 +45,7 @@ class SmartWorkflowPipeline:
         self.previews = {}
         self.classifications = {}
         self.selection_mode = "good_review"   # good | good_review | all
+        self.process_all = False   # True = auto-continue past selection with good_review, no manual step
         self.auto_embed = True
         self.results = {}
         self.scores = {}
@@ -63,11 +64,12 @@ class SmartWorkflowPipeline:
 
     # ── control ─────────────────────────────────────────────────────
     def start(self, paths, folder, selection_mode="good_review", auto_embed=True,
-              resume_state=None):
+              process_all=False, resume_state=None):
         self.paths = list(paths)
         self.folder = folder
         self.selection_mode = selection_mode
         self.auto_embed = auto_embed
+        self.process_all = process_all
         self.stop_flag = False
         self.paused = False
         self._selection_event.clear()
@@ -112,6 +114,7 @@ class SmartWorkflowPipeline:
             "previews": self.previews,
             "classifications": self.classifications,
             "selection_mode": self.selection_mode,
+            "process_all": self.process_all,
             "auto_embed": self.auto_embed,
             "results": self.results,
             "scores": self.scores,
@@ -125,6 +128,7 @@ class SmartWorkflowPipeline:
                 self.previews = resume_state.get("previews", {})
                 self.classifications = resume_state.get("classifications", {})
                 self.selection_mode = resume_state.get("selection_mode", self.selection_mode)
+                self.process_all = resume_state.get("process_all", self.process_all)
                 self.auto_embed = resume_state.get("auto_embed", self.auto_embed)
                 self.results = resume_state.get("results", {})
                 self.scores = resume_state.get("scores", {})
@@ -211,6 +215,14 @@ class SmartWorkflowPipeline:
         for c in self.classifications.values():
             counts[c["label"]] = counts.get(c["label"], 0) + 1
         if self.on_selection_ready:
+            if self.process_all:
+                # Auto-continue on Good + Needs Review — no manual step,
+                # but still tell the UI what was found so the numbers show.
+                self.selection_mode = "good_review"
+                self.on_selection_ready(counts)
+                if not self.stop_flag:
+                    self._save(resume_at="generation")
+                return
             self.on_selection_ready(counts)
             self._selection_event.wait()  # blocks until UI calls set_selection()
             if not self.stop_flag:
