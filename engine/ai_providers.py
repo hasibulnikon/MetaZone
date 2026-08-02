@@ -21,14 +21,14 @@ def _post(url,body,headers,timeout=30):
     except urllib.error.URLError as e:
         raise RuntimeError(f"Network error: {str(e.reason)}")
 
-def call_gemini(key,model,path,prompt):
+def call_gemini(key,model,path,prompt,max_tokens=2200):
     parts=[{"text":prompt}]
     if path:
         b64,mime=img_to_b64(path)
         parts.insert(0,{"inline_data":{"mime_type":mime,"data":b64}})
     r=_post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
         {"contents":[{"parts":parts}],
-         "generationConfig":{"temperature":0.3,"maxOutputTokens":2200}},
+         "generationConfig":{"temperature":0.3,"maxOutputTokens":max_tokens}},
         {"Content-Type":"application/json"})
     try: return r["candidates"][0]["content"]["parts"][0]["text"]
     except: raise RuntimeError(f"Gemini parse error: {str(r)[:200]}")
@@ -51,53 +51,53 @@ def _claude_style_content(path,prompt):
         content.insert(0,{"type":"image","source":{"type":"base64","media_type":mime,"data":b64}})
     return content
 
-def call_openrouter(key,model,path,prompt):
+def call_openrouter(key,model,path,prompt,max_tokens=2200):
     r=_post("https://openrouter.ai/api/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}",
          "HTTP-Referer":"https://metazone.app","X-Title":"Meta Zone"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"OpenRouter parse error: {str(r)[:200]}")
 
-def call_claude(key,model,path,prompt):
+def call_claude(key,model,path,prompt,max_tokens=2200):
     r=_post("https://api.anthropic.com/v1/messages",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_claude_style_content(path,prompt)}]},
         {"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"})
     try: return r["content"][0]["text"]
     except: raise RuntimeError(f"Claude parse error: {str(r)[:200]}")
 
-def call_openai(key,model,path,prompt):
+def call_openai(key,model,path,prompt,max_tokens=2200):
     r=_post("https://api.openai.com/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"OpenAI parse error: {str(r)[:200]}")
 
-def call_groq(key,model,path,prompt):
+def call_groq(key,model,path,prompt,max_tokens=2200):
     r=_post("https://api.groq.com/openai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"Groq parse error: {str(r)[:200]}")
 
-def call_grok(key,model,path,prompt):
+def call_grok(key,model,path,prompt,max_tokens=2200):
     """xAI's Grok — not to be confused with Groq (LPU inference cloud)
     above. Different company, different endpoint, different key format
     (xAI keys look like 'xai-...'; Groq keys look like 'gsk_...')."""
     r=_post("https://api.x.ai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
     except: raise RuntimeError(f"Grok parse error: {str(r)[:200]}")
 
-def call_mistral(key,model,path,prompt):
+def call_mistral(key,model,path,prompt,max_tokens=2200):
     r=_post("https://api.mistral.ai/v1/chat/completions",
-        {"model":model,"max_tokens":2200,"messages":[
+        {"model":model,"max_tokens":max_tokens,"messages":[
             {"role":"user","content":_oa_style_content(path,prompt)}]},
         {"Content-Type":"application/json","Authorization":f"Bearer {key}"})
     try: return r["choices"][0]["message"]["content"]
@@ -182,7 +182,7 @@ def get_active_keys(prefs):
             seq.append((provider,k["key"],model,i))
     return seq
 
-def call_with_failover(path,prompt,prefs,status_cb=None):
+def call_with_failover(path,prompt,prefs,status_cb=None,max_tokens=2200):
     """Try each active key exactly once in order.
     On failure, immediately move to the next key.
     If all keys fail, raise with the last error."""
@@ -193,7 +193,7 @@ def call_with_failover(path,prompt,prefs,status_cb=None):
         try:
             if status_cb:
                 status_cb(f"{provider} · {model_label(provider,model)}…")
-            raw=CALLERS[provider](key,model,path,prompt)
+            raw=CALLERS[provider](key,model,path,prompt,max_tokens=max_tokens)
             return raw,provider,model,key_idx
         except Exception as e:
             last_err=f"{provider}: {str(e)[:120]}"
