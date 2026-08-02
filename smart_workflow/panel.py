@@ -83,6 +83,18 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         ctk.CTkSwitch(ef, text="", variable=self._embed_var, progress_color=GRN,
             button_color=TXT, fg_color=GLASS_BDR, width=40, height=20).pack(side="left")
 
+        # Process All — ON: skip the manual selection step and continue
+        # straight into metadata generation for Good + Needs Review the
+        # moment Quality Inspection finishes. OFF (default): keep today's
+        # manual "pick which files to work with" step at Stage 3.
+        self._process_all_var = BooleanVar(value=False)
+        pf = ctk.CTkFrame(af, fg_color="transparent", corner_radius=0)
+        pf.pack(side="right", padx=12)
+        ctk.CTkLabel(pf, text="Process All", font=ctk.CTkFont("Segoe UI", 10),
+            text_color=TXT2, fg_color="transparent").pack(side="left", padx=(0, 6))
+        ctk.CTkSwitch(pf, text="", variable=self._process_all_var, progress_color=GRN,
+            button_color=TXT, fg_color=GLASS_BDR, width=40, height=20).pack(side="left")
+
         body = ctk.CTkScrollableFrame(self, fg_color=BG1, corner_radius=0,
             scrollbar_button_color=BG3)
         body.grid(row=2, column=0, sticky="nsew")
@@ -109,11 +121,30 @@ class SmartWorkflowPanel(ctk.CTkFrame):
             self._stage_rows[key] = (dot, lbl, status)
 
         self._prog_bar = ctk.CTkProgressBar(body, progress_color=GRN, fg_color=BG3,
-            height=6, corner_radius=3)
+            border_width=1, border_color=GLASS_BDR, height=14, corner_radius=7)
         self._prog_bar.pack(fill="x", padx=16, pady=(0, 4)); self._prog_bar.set(0)
         self._prog_lbl = ctk.CTkLabel(body, text="Import some files, then press Start.",
             font=ctk.CTkFont("Segoe UI", 10), text_color=TXT3, fg_color="transparent")
-        self._prog_lbl.pack(anchor="w", padx=16, pady=(0, 10))
+        self._prog_lbl.pack(anchor="w", padx=16, pady=(0, 6))
+
+        # Live run stats — imported / processing / good / bad — under the
+        # progress bar, updated on every progress/stage callback.
+        stats_row = ctk.CTkFrame(body, fg_color=GLASS, corner_radius=10,
+            border_width=1, border_color=GLASS_BDR)
+        stats_row.pack(fill="x", padx=16, pady=(0, 10))
+        stats_row.grid_columnconfigure((0,1,2,3), weight=1)
+        self._stat_lbls = {}
+        for i,(key,label,color) in enumerate([
+            ("imported","Imported",TXT2),("processing","Processing",AMB_BTN),
+            ("good","Good",GRN),("bad","Bad",RED_BTN)]):
+            cell = ctk.CTkFrame(stats_row, fg_color="transparent", corner_radius=0)
+            cell.grid(row=0, column=i, sticky="ew", padx=10, pady=10)
+            val = ctk.CTkLabel(cell, text="0", font=ctk.CTkFont("Segoe UI", 18, "bold"),
+                text_color=color, fg_color="transparent")
+            val.pack(anchor="center")
+            ctk.CTkLabel(cell, text=label, font=ctk.CTkFont("Segoe UI", 9),
+                text_color=TXT3, fg_color="transparent").pack(anchor="center")
+            self._stat_lbls[key] = val
 
         # Stage 3 — selection (hidden until inspection finishes)
         self._sel_frame = ctk.CTkFrame(body, fg_color=GLASS, corner_radius=10,
@@ -126,6 +157,7 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         self._sel_counts_lbl.pack(anchor="w", padx=14, pady=(0, 8))
         sel_btns = ctk.CTkFrame(self._sel_frame, fg_color="transparent", corner_radius=0)
         sel_btns.pack(fill="x", padx=14, pady=(0, 14))
+        self._sel_btns_frame = sel_btns
         for text, mode in (("Good Only", "good"), ("Good + Needs Review", "good_review"),
                             ("All Images", "all")):
             ctk.CTkButton(sel_btns, text=text, height=32,
@@ -148,10 +180,17 @@ class SmartWorkflowPanel(ctk.CTkFrame):
             font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color="transparent")
         self._report_path_lbl.pack(anchor="w", padx=14, pady=(0, 12))
 
+    def _update_stats(self, imported=None, processing=None, good=None, bad=None):
+        vals = {"imported":imported,"processing":processing,"good":good,"bad":bad}
+        for key,v in vals.items():
+            if v is not None:
+                self._stat_lbls[key].configure(text=str(v))
+
     # ── file-count refresh (called from main_window on import/clear) ──
     def refresh_file_count(self):
         n = len(self.app._all_paths)
         self._file_count_lbl.configure(text=f"{n} file{'s' if n!=1 else ''} loaded")
+        self._update_stats(imported=n)
 
     def _on_import(self):
         self.app._browse_images()
@@ -183,6 +222,7 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         self.app.prefs["last_smart_folder"] = folder
         save_prefs(self.app.prefs)
         self.pipeline.start(paths, folder, auto_embed=self._embed_var.get(),
+                             process_all=self._process_all_var.get(),
                              resume_state=resume_state)
 
     # ── controls ────────────────────────────────────────────────────
@@ -211,6 +251,7 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         self.app.prefs["last_smart_folder"] = folder
         save_prefs(self.app.prefs)
         self.pipeline.start(paths, folder, auto_embed=self._embed_var.get(),
+                             process_all=self._process_all_var.get(),
                              resume_state=resume_state)
 
     def _on_pause(self):
@@ -269,12 +310,20 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         pct = (done / total) if total else 0
         self._prog_bar.set(pct)
         self._prog_lbl.configure(text=msg)
+        self._update_stats(processing=max(total-done, 0))
 
     def _handle_selection_ready(self, counts):
+        auto = self.pipeline.process_all
+        note = "" if auto else "\nChoose which images continue to metadata generation:"
+        prefix = "🤖 Process All is on — continuing automatically.\n" if auto else ""
         self._sel_counts_lbl.configure(
-            text=f"🟢 Good: {counts.get('good',0)}    🟡 Needs Review: {counts.get('review',0)}    "
-                 f"🔴 Rejected: {counts.get('rejected',0)}\nChoose which images continue to metadata generation:")
+            text=f"{prefix}🟢 Good: {counts.get('good',0)}    🟡 Needs Review: {counts.get('review',0)}    "
+                 f"🔴 Rejected: {counts.get('rejected',0)}{note}")
         self._sel_frame.pack(fill="x", padx=16, pady=(0, 10))
+        self._sel_btns_frame.pack_forget() if auto else self._sel_btns_frame.pack(
+            fill="x", padx=14, pady=(0, 14))
+        self._update_stats(processing=0, good=counts.get("good",0),
+            bad=counts.get("review",0)+counts.get("rejected",0))
 
     def _handle_complete(self, summary, report_path):
         lines = [
@@ -290,6 +339,8 @@ class SmartWorkflowPanel(ctk.CTkFrame):
         self._start_btn.configure(state="normal", text="▶  Start Smart Workflow")
         self._pause_btn.configure(state="disabled")
         self._stop_btn.configure(state="disabled")
+        self._update_stats(processing=0, good=summary.get("good",0),
+            bad=summary.get("review",0)+summary.get("rejected",0))
         self.refresh_file_count()
 
     def _handle_error(self, msg):
