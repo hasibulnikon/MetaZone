@@ -6,69 +6,49 @@ from tkinter import messagebox, StringVar
 from core.constants import (AI_PROVIDERS, VISIBLE_PROVIDERS,
     THEME_BG_PRESETS, THEME_ACCENT_PRESETS)
 from core.config import save_prefs
-from core.utils import model_label, model_id_from_label, relaunch_app
+from core.utils import model_label, model_id_from_label, relaunch_app, set_window_icon
 from engine.ai_providers import validate_key
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS_BDR,GLASS_BDR_AC,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_DIM,AMB_BTN,ABSOLUTE_BG)
 
-class APIManagerWindow(ctk.CTkToplevel):
-    def __init__(self,parent,prefs,on_close=None):
-        super().__init__(parent); self.title("Configuration")
-        self.configure(fg_color=BG1); self.resizable(False,False); self.grab_set()
-        self.prefs=prefs; self.on_close=on_close; self._cur=VISIBLE_PROVIDERS[0]
-        self._page="keys"
-        self._build(); self._center(920,620)
-        self.protocol("WM_DELETE_WINDOW",self._done)
-
-    def _center(self,w,h):
-        self.update_idletasks()
-        x=self.master.winfo_x()+(self.master.winfo_width()-w)//2
-        y=self.master.winfo_y()+(self.master.winfo_height()-h)//2
-        self.geometry(f"{w}x{h}+{x}+{y}")
+class APIManagerContent(ctk.CTkFrame):
+    """The actual API Manager / Settings body — usable either embedded
+    directly in a nav page (no title bar/Done button needed, the page
+    already has its own header) or wrapped in a popup Toplevel for the
+    quick-access shortcut. Shared here instead of duplicated so the two
+    entry points can never drift out of sync with each other."""
+    def __init__(self,parent,prefs,mode="api",fg_color=None):
+        # mode="api" -> API Manager: API keys only, no Theme tab/page at all.
+        # mode="settings" -> Settings: Theme only (this is now the ONLY
+        # place Theme is reachable from anywhere in the app).
+        super().__init__(parent,fg_color=fg_color or BG1,corner_radius=0)
+        self.mode=mode
+        self.prefs=prefs; self._cur=VISIBLE_PROVIDERS[0]
+        self._page="keys" if mode=="api" else "theme"
+        self._build()
 
     def _tab_text(self,p):
         n=sum(1 for k in self.prefs.get("ai_keys",{}).get(p,[]) if k.get("active"))
         return p+(f" ●{n}" if n else "")
 
     def _build(self):
-        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(3,weight=1)
-        hdr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
-        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
-        hdr.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(hdr,text="Configuration",
-            font=ctk.CTkFont("Segoe UI",15,"bold"),text_color=TXT,fg_color=BG2
-        ).grid(row=0,column=0,sticky="w",padx=18,pady=14)
-        ctk.CTkButton(hdr,text="✕",width=34,height=34,fg_color="transparent",
-            hover_color=RED_DIM,text_color=TXT3,corner_radius=6,command=self._done
-        ).grid(row=0,column=1,padx=10)
-
-        page_bar=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=44)
-        page_bar.grid(row=1,column=0,sticky="ew"); page_bar.grid_propagate(False)
-        self._page_keys_btn=ctk.CTkButton(page_bar,text="API Keys",width=120,height=30,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
-            command=lambda:self._switch_page("keys"))
-        self._page_keys_btn.pack(side="left",padx=(14,4),pady=7)
-        self._page_theme_btn=ctk.CTkButton(page_bar,text="Theme",width=120,height=30,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color="transparent",hover_color=BG3,text_color=TXT3,corner_radius=8,
-            command=lambda:self._switch_page("theme"))
-        self._page_theme_btn.pack(side="left",padx=4,pady=7)
+        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(1,weight=1)
 
         tab_bar=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=50)
-        tab_bar.grid(row=2,column=0,sticky="ew"); tab_bar.grid_propagate(False)
+        tab_bar.grid(row=0,column=0,sticky="ew"); tab_bar.grid_propagate(False)
         self._keys_tab_bar=tab_bar
         self._tabs={}
-        for p in VISIBLE_PROVIDERS:
-            btn=ctk.CTkButton(tab_bar,text=self._tab_text(p),width=116,height=34,
-                font=ctk.CTkFont("Segoe UI",11,"bold"),
-                fg_color=GRN if p==self._cur else BG3,
-                hover_color=GRN_H,text_color=ABSOLUTE_BG if p==self._cur else TXT2,
-                corner_radius=8,command=lambda pv=p:self._switch(pv))
-            btn.pack(side="left",padx=(8 if p==VISIBLE_PROVIDERS[0] else 3,0),pady=8)
-            self._tabs[p]=btn
+        if self.mode=="api":
+            for p in VISIBLE_PROVIDERS:
+                btn=ctk.CTkButton(tab_bar,text=self._tab_text(p),width=116,height=34,
+                    font=ctk.CTkFont("Segoe UI",11,"bold"),
+                    fg_color=GRN if p==self._cur else BG3,
+                    hover_color=GRN_H,text_color=ABSOLUTE_BG if p==self._cur else TXT2,
+                    corner_radius=8,command=lambda pv=p:self._switch(pv))
+                btn.pack(side="left",padx=(8 if p==VISIBLE_PROVIDERS[0] else 3,0),pady=8)
+                self._tabs[p]=btn
         self._keys_body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
-        self._keys_body.grid(row=3,column=0,sticky="nsew")
+        self._keys_body.grid(row=1,column=0,sticky="nsew")
         self._keys_body.grid_columnconfigure(0,weight=0); self._keys_body.grid_columnconfigure(1,weight=1)
         self._keys_body.grid_rowconfigure(0,weight=1)
         self._lp=ctk.CTkFrame(self._keys_body,fg_color=BG2,corner_radius=0,width=420)
@@ -78,31 +58,16 @@ class APIManagerWindow(ctk.CTkToplevel):
         self._rp.grid_columnconfigure(0,weight=1); self._rp.grid_rowconfigure(1,weight=1)
 
         self._theme_body=ctk.CTkFrame(self,fg_color=BG1,corner_radius=0)
-        self._theme_body.grid(row=2,column=0,rowspan=2,sticky="nsew")
-        self._theme_body.grid_remove()  # hidden until Theme page is selected
+        self._theme_body.grid(row=0,column=0,rowspan=2,sticky="nsew")
         self._build_theme_page()
 
-        ftr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
-        ftr.grid(row=4,column=0,sticky="ew"); ftr.grid_propagate(False)
-        ctk.CTkButton(ftr,text="Done",width=100,height=34,
-            font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
-            command=self._done).pack(side="right",padx=16,pady=9)
-        self._render()
-
-    def _switch_page(self,page):
-        self._page=page
-        keys_active=(page=="keys")
-        self._page_keys_btn.configure(fg_color=GRN if keys_active else "transparent",
-            text_color=ABSOLUTE_BG if keys_active else TXT3)
-        self._page_theme_btn.configure(fg_color="transparent" if keys_active else GRN,
-            text_color=TXT3 if keys_active else ABSOLUTE_BG)
-        if keys_active:
-            self._keys_tab_bar.grid(); self._keys_body.grid()
+        if self.mode=="api":
             self._theme_body.grid_remove()
         else:
             self._keys_tab_bar.grid_remove(); self._keys_body.grid_remove()
-            self._theme_body.grid()
+
+        if self.mode=="api":
+            self._render()
 
     def _build_theme_page(self):
         from ui.theme import BG1 as _cur_bg1
@@ -229,12 +194,24 @@ class APIManagerWindow(ctk.CTkToplevel):
         ctk.CTkLabel(inner,text="Model Selection",font=ctk.CTkFont("Segoe UI",12),
             text_color=TXT2,fg_color=BG2).pack(anchor="w",padx=18,pady=(0,4))
         mv=StringVar(value=model_label(p,cur_id))
-        ctk.CTkComboBox(inner,variable=mv,values=[m[0] for m in models],state="readonly",
+        model_row=ctk.CTkFrame(inner,fg_color=BG2,corner_radius=0)
+        model_row.pack(fill="x",padx=18,pady=(0,4)); model_row.grid_columnconfigure(0,weight=1)
+        ctk.CTkComboBox(model_row,variable=mv,values=[m[0] for m in models],state="readonly",
             font=ctk.CTkFont("Segoe UI",12),fg_color=BG3,text_color=TXT,border_color=GRN_DIM,
             border_width=2,button_color=GRN,button_hover_color=GRN_H,dropdown_fg_color=BG4,
             dropdown_text_color=TXT,dropdown_hover_color=GRN_DIM,
-            dropdown_font=ctk.CTkFont("Segoe UI",12),corner_radius=8,height=40,
-            command=lambda v:self._save_model(p,v)).pack(fill="x",padx=18,pady=(0,16))
+            dropdown_font=ctk.CTkFont("Segoe UI",12),corner_radius=8,height=40
+        ).grid(row=0,column=0,sticky="ew")
+        apply_lbl=ctk.CTkLabel(inner,text="",font=ctk.CTkFont("Segoe UI",10),
+            text_color=GRN,fg_color=BG2)
+        n_keys=len(keys)
+        ctk.CTkButton(inner,
+            text=f"Apply to All Keys ({n_keys})" if n_keys else "Apply Model",
+            height=34,font=ctk.CTkFont("Segoe UI",11,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
+            command=lambda:self._apply_model_all(p,mv.get(),apply_lbl)
+        ).pack(fill="x",padx=18,pady=(6,2))
+        apply_lbl.pack(anchor="w",padx=18,pady=(0,16))
         ctk.CTkFrame(inner,fg_color=GLASS_BDR,height=1,corner_radius=0).pack(fill="x")
         ctk.CTkLabel(inner,text="Add New API Key",font=ctk.CTkFont("Segoe UI",12),
             text_color=TXT2,fg_color=BG2).pack(anchor="w",padx=18,pady=(14,4))
@@ -369,13 +346,62 @@ class APIManagerWindow(ctk.CTkToplevel):
         save_prefs(self.prefs); self._switch(p)
     def _save_model(self,p,label):
         self.prefs.setdefault("ai_models",{})[p]=model_id_from_label(p,label); save_prefs(self.prefs)
+
+    def _apply_model_all(self,p,label,lbl):
+        # There's only ever ONE active model per provider (every stored
+        # key for that provider already shares it during failover) — this
+        # makes that explicit and confirms it, rather than relying on the
+        # dropdown silently applying on selection.
+        self._save_model(p,label)
+        n=len(self.prefs.get("ai_keys",{}).get(p,[]))
+        lbl.configure(text=f"✓  Applied — every key for {p} now uses {label}."
+            if n else f"✓  {label} will be used once you add a key for {p}.")
     def _open_url(self,url):
         import webbrowser; webbrowser.open(url)
+
+
+class APIManagerWindow(ctk.CTkToplevel):
+    """Thin popup wrapper around APIManagerContent — title bar, close
+    button, and a Done button are the only things this adds; everything
+    else lives in the shared content frame so the nav page version and
+    this popup version can never drift apart."""
+    def __init__(self,parent,prefs,on_close=None,mode="api"):
+        super().__init__(parent)
+        self.title("API Manager" if mode=="api" else "Settings")
+        self.configure(fg_color=BG1); self.resizable(False,False); self.grab_set()
+        set_window_icon(self)
+        self.on_close=on_close
+        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(1,weight=1)
+
+        hdr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
+        hdr.grid(row=0,column=0,sticky="ew"); hdr.grid_propagate(False)
+        hdr.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(hdr,text="API Manager" if mode=="api" else "Settings",
+            font=ctk.CTkFont("Segoe UI",15,"bold"),text_color=TXT,fg_color=BG2
+        ).grid(row=0,column=0,sticky="w",padx=18,pady=14)
+        ctk.CTkButton(hdr,text="✕",width=34,height=34,fg_color="transparent",
+            hover_color=RED_DIM,text_color=TXT3,corner_radius=6,command=self._done
+        ).grid(row=0,column=1,padx=10)
+
+        self.content=APIManagerContent(self,prefs,mode=mode)
+        self.content.grid(row=1,column=0,sticky="nsew")
+
+        ftr=ctk.CTkFrame(self,fg_color=BG2,corner_radius=0,height=52)
+        ftr.grid(row=2,column=0,sticky="ew"); ftr.grid_propagate(False)
+        ctk.CTkButton(ftr,text="Done",width=100,height=34,
+            font=ctk.CTkFont("Segoe UI",13,"bold"),
+            fg_color=GRN,hover_color=GRN_H,text_color=ABSOLUTE_BG,corner_radius=8,
+            command=self._done).pack(side="right",padx=16,pady=9)
+
+        self._center(920,660)
+        self.protocol("WM_DELETE_WINDOW",self._done)
+
+    def _center(self,w,h):
+        self.update_idletasks()
+        x=self.master.winfo_x()+(self.master.winfo_width()-w)//2
+        y=self.master.winfo_y()+(self.master.winfo_height()-h)//2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
     def _done(self):
         if self.on_close: self.on_close()
         self.destroy()
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  EMBED WINDOW (compact popup)
-# ══════════════════════════════════════════════════════════════════════
