@@ -2,7 +2,7 @@
 generation, filesize formatting, provider model-id <-> label lookups.
 No AI calls beyond image encoding, no app state.
 """
-import os, sys, subprocess, base64, socket
+import os, sys, subprocess, base64, socket, time
 import customtkinter as ctk
 from PIL import Image
 from core.constants import AI_PROVIDERS, VECTOR_EXTS, VIDEO_EXTS
@@ -36,15 +36,74 @@ def find_exiftool():
     what produced 'Cannot find file at ...\\_MEIxxxxxx\\...\\exiftool.exe'
     errors here even though the CSV/folder were fine. Only trust paths
     that are actually ours: bundled with this build, or sitting next to
-    this app's own exe/script."""
-    if getattr(sys,'frozen',False):
-        b = os.path.join(sys._MEIPASS,'exiftool_pkg','exiftool.exe')
-        if os.path.exists(b): return b
-    base = _app_root()
-    for n in ['exiftool.exe','exiftool']:
-        p = os.path.join(base,n)
-        if os.path.exists(p): return p
+    this app's own exe/script.
+
+    Retries briefly on a miss rather than failing on the very first
+    check: right after relaunch_app() restarts the process, Windows/AV
+    can still be settling a lock on the freshly re-extracted onefile
+    temp folder, which made os.path.exists() report a false negative
+    for a file that genuinely is there — showing 'ExifTool missing' in
+    red immediately after a theme change even though it wasn't."""
+    def _resolve():
+        if getattr(sys,'frozen',False):
+            b = os.path.join(sys._MEIPASS,'exiftool_pkg','exiftool.exe')
+            if os.path.exists(b): return b
+        base = _app_root()
+        for n in ['exiftool.exe','exiftool']:
+            p = os.path.join(base,n)
+            if os.path.exists(p): return p
+        return None
+    found = _resolve()
+    if found or not getattr(sys,'frozen',False):
+        return found
+    for _ in range(4):
+        time.sleep(0.25)
+        found = _resolve()
+        if found:
+            return found
     return None
+
+def _icon_paths():
+    """Resolve icon.ico/icon.png the same way find_exiftool resolves
+    exiftool.exe — bundled next to the frozen EXE (PyInstaller --icon +
+    --add-data), or sitting next to app.py in dev."""
+    ico = png = None
+    if getattr(sys,'frozen',False):
+        b = getattr(sys,'_MEIPASS',None)
+        if b:
+            c = os.path.join(b,'icon.ico')
+            if os.path.exists(c): ico = c
+            c = os.path.join(b,'icon.png')
+            if os.path.exists(c): png = c
+    base = _app_root()
+    if not ico:
+        c = os.path.join(base,'icon.ico')
+        if os.path.exists(c): ico = c
+    if not png:
+        c = os.path.join(base,'icon.png')
+        if os.path.exists(c): png = c
+    return ico, png
+
+def set_window_icon(window):
+    """Applies Meta Zone's real icon to a Tk window's titlebar (and, on
+    Windows, the taskbar) instead of the generic Tk/PyInstaller default.
+    Safe to call on every window (main app, Embed, API Manager) — quietly
+    does nothing if no icon file is bundled rather than raising."""
+    ico, png = _icon_paths()
+    try:
+        if ico and os.name=='nt':
+            window.iconbitmap(ico)
+            return
+    except Exception:
+        pass
+    if png:
+        try:
+            from tkinter import PhotoImage
+            photo = PhotoImage(file=png)
+            window.iconphoto(True, photo)
+            window._icon_photo_ref = photo  # keep a reference alive
+        except Exception:
+            pass
 
 def find_file(folder,name,match_ext):
     exact=os.path.join(folder,name)
@@ -181,17 +240,47 @@ def relaunch_app():
     instead of doing its own fresh extraction. That folder disappears
     once this process exits, so the child breaks the moment you relaunch
     a second time in the same session (the first relaunch can appear to
-    work purely because the old temp folder hasn't been cleaned up yet)."""
+    work purely because the old temp folder hasn't been cleaned up yet).
+
+    Two more failure modes seen specifically on a SECOND relaunch in one
+    session (theme changed twice in a row): a 'Failed to remove
+    temporary directory' warning from the bootloader, paired with a
+    false 'ExifTool missing' status on the freshly-relaunched window.
+    Both point at the same underlying race — Windows/antivirus hasn't
+    finished releasing its lock on THIS process's _MEIxxxxxx extraction
+    folder (which holds exiftool.exe) at the exact moment we vanish and
+    the bootloader tries to clean it up, and/or the new child inherited
+    a cwd that no longer exists once this process is gone. Neither is
+    fully controllable from here, but both are mitigated by: never
+    inheriting this process's (soon-to-be-gone) cwd, confirming the
+    child actually started before we exit, and giving the OS a brief
+    moment before we do."""
     try:
         env=os.environ.copy()
         env.pop("_MEIPASS2",None)
+        # Never hand the child a cwd that lives inside THIS process's
+        # onefile temp extraction — that folder is on its way out the
+        # moment we exit, and a child that inherited it as its working
+        # directory can fail in ways that look identical to a missing
+        # bundled file (ExifTool included) even though it extracted fine.
+        safe_cwd=os.path.expanduser("~") or None
         if getattr(sys,"frozen",False):
-            subprocess.Popen([sys.executable],env=env)
+            proc=subprocess.Popen([sys.executable],env=env,cwd=safe_cwd)
         else:
             main_mod=sys.modules.get("__main__")
             main_file=getattr(main_mod,"__file__",None)
+            proc=None
             if main_file:
-                subprocess.Popen([sys.executable,os.path.abspath(main_file)],env=env)
+                proc=subprocess.Popen([sys.executable,os.path.abspath(main_file)],
+                    env=env,cwd=safe_cwd)
+        # Confirm the child is actually alive (didn't crash on the spot)
+        # before we disappear — and give Windows/AV a brief window to
+        # settle file locks on this process's temp folder before the
+        # bootloader tries to remove it.
+        if proc is not None:
+            time.sleep(0.35)
+            proc.poll()  # refresh returncode; ignored either way — best-effort only
+        time.sleep(0.15)
     finally:
         os._exit(0)
 
