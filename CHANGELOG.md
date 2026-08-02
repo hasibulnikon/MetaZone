@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.6 — Nav/Dashboard restructure, inline pages, Process All, and a large bug-fix batch
+
+**Real bugs found and fixed** (all root-caused and verified via a real
+Xvfb+tkinter test harness this round — screenshots, pixel-diffing, and
+mocked end-to-end runs, not just static review):
+- **App freeze after running a while** — the online-status background
+  thread was calling `self.after()` directly, which isn't thread-safe in
+  Tkinter and was silently corrupting the UI's event-loop state every 8
+  seconds until it eventually hung. Fixed to reschedule on the main
+  thread only.
+- **Smart Workflow drag-and-drop ("0 files loaded")** — the Smart
+  Workflow panel sits on top of and covers every drop target Standard
+  Workflow registers, but was never itself registered as one, so a drop
+  onto it silently did nothing. Registered it, and made the file-count
+  label update live on every import path (browse, drag-drop, and the
+  large-batch async import).
+- **Prompt-to-Prompt: 50 requested → only 6 delivered, one a stray
+  fragment** — batches ran concurrently, so most started with an empty
+  "avoid duplicates" list at the same moment, produced near-identical
+  variations of each other, and dedupe collapsed them down hard (worst
+  at Low creativity, which explicitly asks the model to stay close to
+  the original wording). Fixed with a bounded catch-up loop that tops up
+  any shortfall using a real avoid-list, raised the token budget for
+  these text-only batches (2200→4000 — a batch of 10 detailed prompts
+  could get cut off mid-list), and added a filter that drops
+  preamble/fragment lines. Verified by simulating the exact failure
+  mode: 50 requested → 50 delivered.
+- A crash bug introduced partway through this same round (an edit had
+  accidentally nested the rest of `SmartWorkflowPanel._build()` inside
+  a helper method) — caught immediately by actually running the app
+  under a virtual display instead of only compiling it.
+
+**Nav & page restructure**
+- Left nav is now always a vertical icon strip; the menu button expands
+  it to icon+label and back, it never becomes anything else.
+- Reordered to: Dashboard, Meta Generator, Smart Workflow, Meta
+  Embedder, Prompt Generator, Prompt to Prompt, API Manager, Settings,
+  License, Help.
+- Meta Embedder, API Manager, and Settings are now real inline nav
+  pages — not popups. API Manager and Settings share one underlying
+  content frame (`APIManagerContent`) with two modes so the popup
+  shortcut and the nav page can never drift apart; same pattern for the
+  Embedder (`EmbedContent`). The old popups still exist for quick access
+  (Metadata Generator's sidebar shortcut opens API Manager as a popup)
+  but are thin wrappers around the same shared content now.
+- Removed the sidebar Standard/Smart Workflow toggle and the
+  Metadata/Prompt mode toggle — the nav is the only place those are
+  chosen now. Removed the permanent top "Metadata AI"/"Embed" buttons.
+- Settings is now the only place Theme is reachable from; API Manager
+  is API keys only, renamed from "Configuration".
+
+**Dashboard**
+- Productivity Insights and System Status are hidden for now, replaced
+  in that exact spot by a 2×3 Quick Actions grid.
+- "Idle"/"Empty" moved to the top-right corner of the Running
+  Tasks/In Queue cards.
+- Added dashboard-only Stop All (pauses every running workflow without
+  closing anything) and Refresh (resets the view only, never touches a
+  running process) next to the online indicator.
+- Confirmed nothing in the stats/activity area is click-bound.
+
+**Smart Workflow**
+- Thickened the progress bar to match the rest of the app, added a live
+  imported/processing/good/bad stats row underneath it.
+- Added a "Process All" toggle next to Auto-Embed: on, metadata
+  generation auto-starts on Good + Needs Review right after Quality
+  Inspection with no manual step; off (default) keeps today's manual
+  selection step. Verified end-to-end both ways with a mocked run.
+
+**Other**
+- Real app icon (dark badge, green "MZ") now shows in every window's
+  titlebar and the Windows taskbar/EXE — wired into the PyInstaller
+  build.
+- API Manager: explicit "Apply to All Keys" action for switching a
+  provider's model, with visible confirmation.
+- Lightened the accent color presets that read as too dark against the
+  dark background (Red/Purple/Pink/Violet/Blue) to match Teal's
+  brightness; Green/Orange/Teal were already fine.
+- Hardened the theme-change restart path and the ExifTool detection
+  against the "second theme change in a row" failure seen in testing —
+  best-effort, since the exact Windows/antivirus interaction can't be
+  fully verified outside real Windows.
+- prefs.json now lives in a shared `C:\MetaZone` folder instead of next
+  to the EXE, with automatic one-time migration of existing settings,
+  so it survives switching between installed versions.
+
+**Not done yet, left honestly unfinished:** Prompt Generator is still
+not a fully independent page (it shares Metadata Generator's upload/
+results area, though the nav-only mode switch is in place); no general
+resize/stutter pass beyond what was already debounced; the "12 cards /
+constantly deforming" report could not be reproduced (card positions
+were pixel-identical before/after a content update in testing) —
+needs more detail to keep chasing productively.
+
 ## v0.5.1 — Prompt-to-Prompt Generator (Part 2 of the v0.5 spec) + provider updates
 
 **Prompt-to-Prompt Generator** — a brand-new workspace, fully wired into
