@@ -3,7 +3,7 @@ keyword/title/description rules, supported file extensions. No logic
 here — just data other modules read.
 """
 
-APP_VERSION = "v0.5.1"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
+APP_VERSION = "v0.6"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
 
 AI_PROVIDERS = {
     "OpenRouter": {
@@ -130,11 +130,11 @@ THEME_BG_PRESETS = {
 }
 THEME_ACCENT_PRESETS = {
     "Green":  "#00c853",
-    "Red":    "#e53935",
-    "Purple": "#8e24aa",
-    "Pink":   "#d81b60",
-    "Violet": "#7c4dff",
+    "Red":    "#eb6562",
+    "Purple": "#b53bd5",
+    "Pink":   "#e8447f",
+    "Violet": "#875cff",
     "Orange": "#fb8c00",
-    "Blue":   "#2979ff",
+    "Blue":   "#5293ff",
     "Teal":   "#00bfa5",
 }
