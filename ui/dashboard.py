@@ -37,25 +37,25 @@ def _stat_card(parent, icon, value, label, sub, color, corner=False):
     # Non-interactive by design — nothing in here is clickable, so give it
     # the plain arrow cursor rather than anything implying interaction.
     card.configure(cursor="arrow")
-    icon_lbl = ctk.CTkLabel(card, text=icon, font=ctk.CTkFont("Segoe UI", 16),
+    icon_lbl = ctk.CTkLabel(card, text=icon, font=ctk.CTkFont("Segoe UI", 17),
         fg_color=color, text_color=TXT, corner_radius=8, width=34, height=34)
     icon_lbl.pack(anchor="w", padx=14, pady=(14, 8))
     if corner:
         # Idle/Empty-style status text sits in the top-right corner of the
         # card instead of floating as a caption underneath the value.
-        corner_lbl = ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 9, "bold"),
+        corner_lbl = ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 10, "bold"),
             text_color=TXT3, fg_color=GLASS, anchor="e")
         corner_lbl.place(relx=1.0, x=-12, y=14, anchor="ne")
         card._corner_lbl = corner_lbl
     else:
         card._corner_lbl = None
-    ctk.CTkLabel(card, text=value, font=ctk.CTkFont("Segoe UI", 22, "bold"),
+    ctk.CTkLabel(card, text=value, font=ctk.CTkFont("Segoe UI", 23, "bold"),
         text_color=TXT, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14)
-    ctk.CTkLabel(card, text=label, font=ctk.CTkFont("Segoe UI", 11),
+    ctk.CTkLabel(card, text=label, font=ctk.CTkFont("Segoe UI", 12),
         text_color=TXT2, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14, pady=(0, 4))
     if not corner:
         if sub:
-            ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 9),
+            ctk.CTkLabel(card, text=sub, font=ctk.CTkFont("Segoe UI", 10),
                 text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14, pady=(0, 12))
         else:
             ctk.CTkLabel(card, text="", fg_color=GLASS, height=8).pack()
@@ -65,10 +65,10 @@ def _stat_card(parent, icon, value, label, sub, color, corner=False):
 
 
 def _kv_row(parent, label, value, row, value_color=None):
-    ctk.CTkLabel(parent, text=label, font=ctk.CTkFont("Segoe UI", 11),
+    ctk.CTkLabel(parent, text=label, font=ctk.CTkFont("Segoe UI", 12),
         text_color=TXT3, fg_color="transparent", anchor="w"
     ).grid(row=row + 1, column=0, sticky="w", padx=14, pady=4)
-    lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont("Segoe UI", 11, "bold"),
+    lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont("Segoe UI", 12, "bold"),
         text_color=value_color or TXT, fg_color="transparent", anchor="e")
     lbl.grid(row=row + 1, column=1, sticky="e", padx=14, pady=4)
     return lbl
@@ -80,7 +80,7 @@ def _section(parent, title, icon=""):
     box.grid_columnconfigure(0, weight=1)
     box.grid_columnconfigure(1, weight=0)
     hdr = f"{icon}  {title}" if icon else title
-    ctk.CTkLabel(box, text=hdr, font=ctk.CTkFont("Segoe UI", 12, "bold"),
+    ctk.CTkLabel(box, text=hdr, font=ctk.CTkFont("Segoe UI", 13, "bold"),
         text_color=TXT, fg_color=GLASS, anchor="w"
     ).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 6))
     return box
@@ -100,10 +100,10 @@ class DashboardPage(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(self, fg_color=BG1, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 10))
-        ctk.CTkLabel(hdr, text="Dashboard", font=ctk.CTkFont("Segoe UI", 22, "bold"),
+        ctk.CTkLabel(hdr, text="Dashboard", font=ctk.CTkFont("Segoe UI", 23, "bold"),
             text_color=TXT, fg_color=BG1).pack(anchor="w")
         ctk.CTkLabel(hdr, text="Overview of your productivity and system status",
-            font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color=BG1
+            font=ctk.CTkFont("Segoe UI", 12), text_color=TXT3, fg_color=BG1
         ).pack(anchor="w")
 
         body = ctk.CTkScrollableFrame(self, fg_color=BG1, corner_radius=0,
@@ -113,7 +113,7 @@ class DashboardPage(ctk.CTkFrame):
         self._body = body
 
         # Today's Statistics
-        ctk.CTkLabel(body, text="Today's Statistics", font=ctk.CTkFont("Segoe UI", 13, "bold"),
+        ctk.CTkLabel(body, text="Today's Statistics", font=ctk.CTkFont("Segoe UI", 14, "bold"),
             text_color=TXT, fg_color=BG1, anchor="w").pack(anchor="w", padx=4, pady=(4, 8))
         today_row = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
         today_row.pack(fill="x", pady=(0, 16))
@@ -195,7 +195,7 @@ class DashboardPage(ctk.CTkFrame):
             ("⏮  Resume Last Project", "#334155", self._resume_last_project),
         ]
         for i, (text, color, cmd) in enumerate(actions):
-            ctk.CTkButton(qa_box, text=text, height=48, font=ctk.CTkFont("Segoe UI", 11, "bold"),
+            ctk.CTkButton(qa_box, text=text, height=48, font=ctk.CTkFont("Segoe UI", 14, "bold"),
                 fg_color=color, hover_color=color, text_color=TXT, corner_radius=8,
                 command=cmd).grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
 
@@ -217,9 +217,9 @@ class DashboardPage(ctk.CTkFrame):
             dot = ctk.CTkFrame(legend, fg_color="transparent")
             dot.pack(side="left", padx=(0, 12))
             ctk.CTkLabel(dot, text="●", text_color=color, fg_color="transparent",
-                font=ctk.CTkFont("Segoe UI", 11)).pack(side="left")
+                font=ctk.CTkFont("Segoe UI", 12)).pack(side="left")
             ctk.CTkLabel(dot, text=CHART_LABELS[key], text_color=TXT3, fg_color="transparent",
-                font=ctk.CTkFont("Segoe UI", 9)).pack(side="left", padx=(2, 0))
+                font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=(2, 0))
         self._chart_canvas = tkinter.Canvas(chart_box, height=180, bg=BG2,
             highlightthickness=0)
         self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 12))
@@ -336,7 +336,7 @@ class DashboardPage(ctk.CTkFrame):
         rows = stats_db.recent_activity(6)
         if not rows:
             ctk.CTkLabel(self._activity_list, text="No activity yet.",
-                font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3,
+                font=ctk.CTkFont("Segoe UI", 12), text_color=TXT3,
                 fg_color="transparent").pack(anchor="w", padx=10, pady=10)
             return
         labels = {"metadata_generation": "Metadata generation", "embedding": "Embedding",
@@ -348,16 +348,16 @@ class DashboardPage(ctk.CTkFrame):
             icon = "✓" if status == "completed" else "✕"
             color = GRN if status == "completed" else RED_BTN
             ctk.CTkLabel(row, text=icon, text_color=color, fg_color="transparent",
-                font=ctk.CTkFont("Segoe UI", 11, "bold"), width=16).pack(side="left")
+                font=ctk.CTkFont("Segoe UI", 12, "bold"), width=16).pack(side="left")
             txt = ctk.CTkFrame(row, fg_color="transparent")
             txt.pack(side="left", fill="x", expand=True, padx=(4, 0))
             title = f"{labels.get(kind, kind)} {'completed' if status=='completed' else 'failed'}"
-            ctk.CTkLabel(txt, text=title, font=ctk.CTkFont("Segoe UI", 10, "bold"),
+            ctk.CTkLabel(txt, text=title, font=ctk.CTkFont("Segoe UI", 11, "bold"),
                 text_color=TXT2, fg_color="transparent", anchor="w").pack(anchor="w")
             sub = detail or f"Count: {count}"
-            ctk.CTkLabel(txt, text=sub, font=ctk.CTkFont("Segoe UI", 9),
+            ctk.CTkLabel(txt, text=sub, font=ctk.CTkFont("Segoe UI", 10),
                 text_color=TXT3, fg_color="transparent", anchor="w").pack(anchor="w")
-            ctk.CTkLabel(row, text=self._relative_time(ts), font=ctk.CTkFont("Segoe UI", 9),
+            ctk.CTkLabel(row, text=self._relative_time(ts), font=ctk.CTkFont("Segoe UI", 10),
                 text_color=TXT3, fg_color="transparent").pack(side="right")
 
     def _relative_time(self, ts):
