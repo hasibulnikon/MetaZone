@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.6.2 — Thumbnail disk cache + lazy page init (rest of the performance directive)
+
+- **Thumbnail disk cache**: resized thumbnails are now saved once to a
+  shared cache folder (next to prefs.json in `C:\MetaZone\.cache\thumbs`)
+  and reused on later imports of the same file — mtime-keyed, so editing
+  or replacing a source image automatically invalidates its cached
+  thumbnail without needing to hash the whole file. Includes light
+  automatic cleanup so the cache can't grow unbounded. Verified
+  end-to-end: cache hit path measured at ~0.6ms vs ~200ms for a cold
+  generate on a test image, and confirmed real cache files get created
+  when importing into the actual running app.
+- **Lazy page initialization**: Meta Embedder, API Manager, and Settings
+  now build the first time you actually navigate to them instead of at
+  startup — profiling showed this was costing ~1s of App() construction
+  for pages a given session might never visit. Startup measured at
+  3.6s → 2.5s. Once built, each page is cached exactly as before (never
+  rebuilt, never destroyed) — this only changes *when* construction
+  happens. Verified every page, including the newly-lazy ones, still
+  builds correctly on first visit with zero errors.
+- Dashboard, Metadata/Prompt Generator, and Smart Workflow stay eager —
+  Dashboard is the landing page every session hits immediately, and the
+  other two are commonly the very next thing opened, so deferring them
+  had little real-world upside for the added risk.
+
+## v0.6.1 — Performance root cause found & fixed, Working View, and a bug batch
+
+**The big one:** measured `_render_page()` at **6.5 seconds** per grid-column
+change or page navigation at a 372-image scale — completely freezing the
+main thread. That's the real explanation behind several reported symptoms
+that looked unrelated: the scrollbar and mouse wheel appearing "stuck"
+(the whole app was frozen, not broken), the visible deform/reform flash
+on grid changes, and a 1-column Expanded layout looking stuck until
+restart. Root cause: every trigger (page nav, grid-column change, any
+re-render) destroyed and rebuilt every card widget from scratch — for a
+CTkTextbox-heavy Expanded card, construction was always the expensive
+part, never the data. Rewrote the renderer to reuse a pool of already-
+built card widgets via a new `rebind()` method (added to both
+`MetaResultCard` and `CompactEditCard`) instead of destroy+reconstruct.
+Re-measured after the fix: page navigation **6.5s → ~0.18s** (35x
+faster), grid-column changes **6.5s → ~0.5s** (13x faster) — profiled the
+remainder and confirmed it's legitimate CustomTkinter canvas redraw, not
+waste.
+
+**Working View** — new toggle next to the grid-column selector. While
+generation is running, the results grid shows only the cards currently
+being processed (exactly as many as your Concurrent Generation setting),
+advancing live as each one finishes — in both Expanded and Compact.
+Automatically reverts to normal pagination once nothing is actively
+processing. Verified end-to-end with a scripted run.
+
+**Other fixes this round:**
+- Added an Embed button to Metadata Generator, to the left of Clear All —
+  shown only after a full, natural generation completion; stays hidden
+  through Stop/Pause and disappears again on Clear All. Verified with
+  three separate scripted scenarios (natural completion, Clear All,
+  Stop).
+- Found and fixed a second real crash bug while working on the above:
+  `CompactEditCard.get_result()` was defined twice — the second
+  (winning) definition crashed on `None._boxes`, which would have broken
+  Save/Export CSV any time it ran from Compact view.
+- Concurrent Generation max raised from 10x to 20x.
+- Thumbnail size unified to 80px long edge in both Expanded and Compact
+  (a stale code comment had claimed Expanded was already 120px — it was
+  actually still 60px).
+- Title/Description/Keyword counters split into their own accent-colored
+  label next to the field name, instead of one small gray combined label.
+- Nav menu button alignment fixed — it was sitting in its own narrower
+  frame instead of being sized/packed identically to the icon buttons
+  below it.
+- Dashboard font sizes increased across the board; Quick Action button
+  labels bumped further so they're clearly more prominent.
+- Left honestly unfinished: the theme-change tempdir-warning/false
+  ExifTool-missing report needs real Windows testing to make further
+  progress on — the Python-level hardening from v0.6 is still in place,
+  but this can't be verified or root-caused further from this
+  environment. Lazy page initialization (building non-Dashboard
+  workspaces on first visit instead of at startup) from the performance
+  directive is also not done — page-switching itself is now fast via the
+  caching fix above, so this was deprioritized in favor of the
+  higher-impact items in this list.
+
 ## v0.6 — Nav/Dashboard restructure, inline pages, Process All, and a large bug-fix batch
 
 **Real bugs found and fixed** (all root-caused and verified via a real
