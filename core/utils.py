@@ -2,7 +2,7 @@
 generation, filesize formatting, provider model-id <-> label lookups.
 No AI calls beyond image encoding, no app state.
 """
-import os, sys, subprocess, base64, socket, time
+import os, sys, subprocess, base64, socket, time, hashlib
 import customtkinter as ctk
 from PIL import Image
 from core.constants import AI_PROVIDERS, VECTOR_EXTS, VIDEO_EXTS
@@ -136,15 +136,80 @@ def check_online():
     except Exception:
         return False
 
+def _thumb_cache_dir():
+    """Shared thumbnail cache — lives next to prefs.json in the same
+    common MetaZone folder (see core/config.py's _common_pref_dir) so it
+    persists across app versions the same way settings do."""
+    try:
+        from core.config import _common_pref_dir
+        base = os.path.join(_common_pref_dir(), ".cache", "thumbs")
+    except Exception:
+        base = os.path.join(os.path.expanduser("~"), ".metazone_cache", "thumbs")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        return None
+    return base
+
+def _thumb_cache_key(path, tag):
+    """mtime-keyed — a source file being replaced/edited automatically
+    invalidates its cached thumbnail without needing to hash file
+    contents (which would mean reading the whole file just to decide
+    whether to skip reading the whole file)."""
+    try:
+        mtime = int(os.path.getmtime(path))
+        size = os.path.getsize(path)
+    except Exception:
+        mtime, size = 0, 0
+    raw = f"{os.path.abspath(path)}|{tag}|{mtime}|{size}"
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()
+
+def _thumb_cache_cleanup(cache_dir, max_files=4000):
+    """Automatic light cleanup — if the cache has grown past max_files,
+    delete the oldest ones (by mtime) down to 90% of the cap. Cheap
+    check (just a listdir) so it's fine to call opportunistically."""
+    try:
+        entries = os.listdir(cache_dir)
+        if len(entries) <= max_files:
+            return
+        full = [os.path.join(cache_dir, e) for e in entries]
+        full.sort(key=lambda p: os.path.getmtime(p))
+        n_remove = len(full) - int(max_files * 0.9)
+        for p in full[:n_remove]:
+            try: os.remove(p)
+            except Exception: pass
+    except Exception:
+        pass
+
 def make_thumb(path, size=(120,85)):
-    """Build a CTkImage off the main thread. Returns None on failure."""
+    """Build a CTkImage off the main thread. Returns None on failure.
+    Disk-cached: a resized copy is saved once and reused on later
+    imports of the same file, instead of re-opening/re-resizing the
+    full original image every single time."""
     try:
         ext = os.path.splitext(path)[1].lower()
         if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
             return None
+        cache_dir = _thumb_cache_dir()
+        cache_path = None
+        if cache_dir:
+            key = _thumb_cache_key(path, f"box{size[0]}x{size[1]}")
+            cache_path = os.path.join(cache_dir, key + ".jpg")
+            if os.path.exists(cache_path):
+                try:
+                    cimg = Image.open(cache_path); cimg.load()
+                    return ctk.CTkImage(cimg, size=cimg.size)
+                except Exception:
+                    pass  # cache file corrupt/unreadable — fall through and regenerate
         img = Image.open(path)
         img = img.convert("RGB")
         img.thumbnail(size, Image.LANCZOS)
+        if cache_path:
+            try:
+                img.save(cache_path, "JPEG", quality=85)
+                _thumb_cache_cleanup(cache_dir)
+            except Exception:
+                pass
         return ctk.CTkImage(img, size=img.size)
     except Exception:
         return None
@@ -155,11 +220,22 @@ def make_thumb_min_edge(path, min_edge=100, max_edge=170):
     (both sides <= size), this scales so the SHORTER side is exactly
     min_edge and the longer side follows the image's own aspect ratio —
     capped at max_edge so an extreme panorama/vertical image can't blow
-    out the card's layout."""
+    out the card's layout. Disk-cached the same way as make_thumb."""
     try:
         ext = os.path.splitext(path)[1].lower()
         if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
             return None
+        cache_dir = _thumb_cache_dir()
+        cache_path = None
+        if cache_dir:
+            key = _thumb_cache_key(path, f"edge{min_edge}x{max_edge}")
+            cache_path = os.path.join(cache_dir, key + ".jpg")
+            if os.path.exists(cache_path):
+                try:
+                    cimg = Image.open(cache_path); cimg.load()
+                    return ctk.CTkImage(cimg, size=cimg.size)
+                except Exception:
+                    pass
         img = Image.open(path)
         img = img.convert("RGB")
         w, h = img.size
@@ -173,6 +249,12 @@ def make_thumb_min_edge(path, min_edge=100, max_edge=170):
             new_w, new_h = int(round(new_w * scale2)), int(round(new_h * scale2))
         new_w, new_h = max(new_w, 1), max(new_h, 1)
         img = img.resize((new_w, new_h), Image.LANCZOS)
+        if cache_path:
+            try:
+                img.save(cache_path, "JPEG", quality=85)
+                _thumb_cache_cleanup(cache_dir)
+            except Exception:
+                pass
         return ctk.CTkImage(img, size=(new_w, new_h))
     except Exception:
         return None
