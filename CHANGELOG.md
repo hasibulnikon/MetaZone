@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.6.3 — Recurring freeze root-caused, Working View readability, drag-scroll, and a bug batch
+
+**Item 5, the recurring "Not Responding" freeze:** found a second, much more
+frequent instance of the exact bug class already fixed once for the
+online-status loop — the generation-completion callback was calling
+`self.after()` directly from a background thread, on *every single batch
+you run*. Rewrote the entire generation status pipeline (working/done/
+failed updates, the completion signal, the ExifTool check, the
+online-status loop) through a proper thread-safe queue that only the main
+thread ever drains — no Tk call now originates off the main thread
+anywhere in that path. Verified end-to-end with a real generation run.
+
+**Other real bugs found and fixed:**
+- The floating ▼/▲ buttons next to the results grid were actually
+  changing pages, not scrolling — restored to their real function (mouse-
+  wheel-equivalent scroll of the current page); the separate ◀/▶ Page Nav
+  buttons still handle pagination.
+- Moving the window (not resizing it) was still triggering the deform/
+  reform flash — tightened the resize handler to check the event's actual
+  width before doing anything, since a pure drag fires `<Configure>` on
+  child widgets in some window managers even though nothing about their
+  size changed.
+- Found a real mismatch from the earlier thumbnail-size unification: the
+  card *frame* was resized to 80px but the actual *requested* thumbnail
+  resolution was still defaulting to 58×58 — fixed in both the live-
+  display path and the page-navigation rebind path.
+
+**New this round:**
+- Whole-batch thumbnail prefetching — importing now warms the disk cache
+  for every image immediately in the background, not just the page
+  currently on screen, so paging through a large batch later hits the
+  cache instantly. Verified: 8 images → 16 cache files (both view-mode
+  sizes) within 1.5s of import.
+- Clear All now also wipes the thumbnail cache (background thread, since
+  the folder can hold many files) — never touches prefs.json, which lives
+  in a different folder entirely.
+- Click-and-drag scrolling on the results grid — hold and move the mouse
+  to scroll live, like a touch gesture. Bound directly on each card and
+  its thumbnail (not just empty canvas background, which cards leave
+  almost none of).
+- Working View now holds a just-finished card visible for a few seconds
+  instead of swapping it out the instant it completes — the "only a
+  blink before it's gone" complaint. The page label now shows both counts
+  (e.g. "⟳ Working (10)  ✓ (3)") instead of lumping everything under
+  "Working".
+- Nav now shows short labels (Home/Metadata/Smart/Embed/Prompt/P2P/API/
+  Setting/License/Help) under each icon even in collapsed mode; expanded
+  mode is unchanged.
+- Investigated the "concurrency=20 feels slower than older versions"
+  report: audited the whole concurrency path (a standard bounded
+  `ThreadPoolExecutor`, unchanged this session) and found no code-level
+  bottleneck. Most likely explanations are free-tier AI provider rate
+  limiting at higher concurrency, or a perceptual effect from more cards
+  being visible at once — flagging this honestly rather than claiming a
+  fix for something not found. The app already tracks real "Avg.
+  Processing Speed" (img/min) from actual completion data in
+  `core/stats_db.py`, currently just not visible on screen since that
+  panel was hidden in v0.6.1's dashboard restructure.
+
 ## v0.6.2 — Thumbnail disk cache + lazy page init (rest of the performance directive)
 
 - **Thumbnail disk cache**: resized thumbnails are now saved once to a
