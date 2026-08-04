@@ -105,6 +105,66 @@ def set_window_icon(window):
         except Exception:
             pass
 
+def clear_thumb_cache():
+    """Wipes every cached thumbnail file. Deliberately only ever touches
+    files INSIDE the .cache/thumbs folder — prefs.json lives one level up
+    in the common MetaZone folder itself and is never in scope here, by
+    construction, not just by convention."""
+    cache_dir = _thumb_cache_dir()
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return 0
+    n = 0
+    for entry in os.listdir(cache_dir):
+        p = os.path.join(cache_dir, entry)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+def prefetch_thumb_to_cache(path, size=None, min_edge=None, max_edge=170):
+    """Resizes and writes ONE thumbnail straight to the disk cache —
+    deliberately never constructs a CTkImage or touches Tk at all, so
+    this is safe to call from as many background threads as needed for
+    a whole-batch prefetch (see main_window._prefetch_all_thumbnails),
+    not just the bounded single-widget worker pool that make_thumb/
+    make_thumb_min_edge use when a card is actually on screen."""
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
+            return
+        cache_dir = _thumb_cache_dir()
+        if not cache_dir:
+            return
+        if min_edge:
+            key = _thumb_cache_key(path, f"edge{min_edge}x{max_edge}")
+        else:
+            size = size or (120, 85)
+            key = _thumb_cache_key(path, f"box{size[0]}x{size[1]}")
+        cache_path = os.path.join(cache_dir, key + ".jpg")
+        if os.path.exists(cache_path):
+            return  # already cached — nothing to do
+        img = Image.open(path).convert("RGB")
+        if min_edge:
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                return
+            short = min(w, h)
+            scale = min_edge / float(short)
+            new_w, new_h = int(round(w * scale)), int(round(h * scale))
+            if max(new_w, new_h) > max_edge:
+                scale2 = max_edge / float(max(new_w, new_h))
+                new_w, new_h = int(round(new_w * scale2)), int(round(new_h * scale2))
+            img = img.resize((max(new_w, 1), max(new_h, 1)), Image.LANCZOS)
+        else:
+            img.thumbnail(size, Image.LANCZOS)
+        img.save(cache_path, "JPEG", quality=85)
+        _thumb_cache_cleanup(cache_dir)
+    except Exception:
+        pass
+
 def find_file(folder,name,match_ext):
     exact=os.path.join(folder,name)
     if os.path.exists(exact): return exact
