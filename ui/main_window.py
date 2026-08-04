@@ -13,7 +13,7 @@ from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
-from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon
+from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
@@ -41,6 +41,13 @@ class App(DnDCTk):
         self._all_paths=[]; self._results={}
         self._thumb_queue=queue.Queue()
         self._thumb_job_queue=queue.Queue()
+        self._ui_action_queue=queue.Queue()
+        # ^ generation worker threads (process_one) push callables here
+        # instead of calling self.after()/touching any widget directly —
+        # see _poll_ui_actions. Consolidates the fix applied to the
+        # online-status loop and generation-completion flag: NO Tk call
+        # ever originates on a background thread for this path, which
+        # removes the whole class of bug those two turned out to be.
         self._card_by_path={}
         self.ai_running=False; self.ai_stop_flag=False
         self._ai_paused=False; self.current_mode="meta"
@@ -48,6 +55,19 @@ class App(DnDCTk):
         self._gen_epoch=0
         self._show_desc_mode=True
         self._task_mgr=TaskManager()
+        self._gen_done_flag=False
+        # ^ set (not called) from TaskManager's background "watch" thread
+        # when a Standard Workflow batch finishes — see _poll_gen_done.
+        # This used to be `on_all_done=lambda: self.after(0,self._gen_done)`,
+        # which calls a Tk method (self.after) directly from that
+        # background thread on every single generation completion — not
+        # thread-safe, and a very likely repeat contributor to the
+        # "app randomly freezes/goes Not Responding after a while"
+        # reports across several versions, the same class of bug already
+        # found and fixed once for the online-status loop. A plain bool
+        # set from a worker thread is safe (GIL-protected); polling it
+        # from a main-thread-scheduled after() loop means NO Tk call
+        # ever happens off the main thread for this path.
         self._last_ai_provider=None; self._last_ai_model=None
         # View Settings — Expanded (1-4 user-selectable columns) or Compact
         # (columns auto-fit to the available width). Both render through
@@ -81,6 +101,8 @@ class App(DnDCTk):
         self.after(200,self._check_et)
         self.after(500,self._online_loop)
         self.after(80,self._poll_thumb_queue)
+        self.after(100,self._poll_gen_done)
+        self.after(30,self._poll_ui_actions)
         self._start_thumb_workers()
 
     def _start_thumb_workers(self,n=4):
@@ -113,15 +135,14 @@ class App(DnDCTk):
     def _online_loop(self):
         def _c():
             online=check_online()
-            # Both the state update AND the next reschedule must happen on
-            # the main/Tk thread — self.after() is NOT thread-safe, and
-            # calling it directly from this background thread (as before)
-            # was the actual root cause of the app randomly freezing/going
-            # unresponsive after running for a while: every 8s cycle had a
-            # chance to corrupt Tcl's internal event-loop state from the
-            # wrong thread, and eventually the next keypress or click would
-            # hang because the interpreter was already wedged.
-            self.after(0,lambda:(self._set_online(online),self.after(8000,self._online_loop)))
+            # Never call self.after() (or anything Tk) from this thread —
+            # push the update through the same safe queue every other
+            # worker uses; the reschedule itself is safe here since this
+            # loop's own driver is the self.after(500,...)/self.after(8000,...)
+            # scheduled from _poll_ui_actions below, which runs on the main
+            # thread.
+            self._ui_action_queue.put(lambda:self._set_online(online))
+            self._ui_action_queue.put(lambda:self.after(8000,self._online_loop))
         threading.Thread(target=_c,daemon=True).start()
 
     def _set_online(self,online):
@@ -138,6 +159,27 @@ class App(DnDCTk):
             self.after(350,lambda:self._blink(n+1))
 
     # ── Thumb queue ────────────────────────────────────────────────
+    def _poll_ui_actions(self):
+        # Bounded per tick — a burst of many files finishing at once
+        # (high concurrency) drains over a few ticks instead of doing
+        # unbounded work in one go, which is its own mild throttle.
+        for _ in range(40):
+            try:
+                action=self._ui_action_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                action()
+            except Exception:
+                pass
+        self.after(30,self._poll_ui_actions)
+
+    def _poll_gen_done(self):
+        if self._gen_done_flag:
+            self._gen_done_flag=False
+            self._gen_done()
+        self.after(100,self._poll_gen_done)
+
     def _poll_thumb_queue(self):
         done=0
         try:
@@ -215,20 +257,20 @@ class App(DnDCTk):
         # Meta Embedder, Prompt Generator, Prompt to Prompt, API Manager,
         # Settings, License, Help.
         items=[
-            ("dashboard","🏠","Dashboard",False),
-            ("metadata_gen","📝","Meta Generator",False),
-            ("smart","🚀","Smart Workflow",False),
-            ("embedder","📦","Meta Embedder",False),
-            ("prompt_gen","✨","Prompt Generator",False),
-            ("prompt_to_prompt","🔄","Prompt to Prompt",False),
-            ("ai_providers","🤖","API Manager",False),
-            ("settings","⚙","Settings",False),
-            ("license","🔑","License",True),
-            ("help","❓","Help",True),
+            ("dashboard","🏠","Dashboard","Home",False),
+            ("metadata_gen","📝","Meta Generator","Metadata",False),
+            ("smart","🚀","Smart Workflow","Smart",False),
+            ("embedder","📦","Meta Embedder","Embed",False),
+            ("prompt_gen","✨","Prompt Generator","Prompt",False),
+            ("prompt_to_prompt","🔄","Prompt to Prompt","P2P",False),
+            ("ai_providers","🤖","API Manager","API",False),
+            ("settings","⚙","Settings","Setting",False),
+            ("license","🔑","License","License",True),
+            ("help","❓","Help","Help",True),
         ]
         self._nav_items=items
-        for key,icon,label,coming_soon in items:
-            b=ctk.CTkButton(nav,text=icon,anchor="center",height=38,width=NAV_W_COLLAPSED-16,
+        for key,icon,label,short,coming_soon in items:
+            b=ctk.CTkButton(nav,text=icon,anchor="center",height=42,width=NAV_W_COLLAPSED-16,
                 font=ctk.CTkFont("Segoe UI",14,"bold" if not coming_soon else "normal"),
                 fg_color="transparent",hover_color=BG3,
                 text_color=(TXT3 if coming_soon else TXT2),
@@ -251,12 +293,16 @@ class App(DnDCTk):
         self._apply_nav_labels()
 
     def _apply_nav_labels(self):
-        for key,icon,label,coming_soon in self._nav_items:
+        for key,icon,label,short,coming_soon in self._nav_items:
             b=self._nav_btns[key]
             if self._nav_expanded:
-                b.configure(text=f"{icon}   {label}",anchor="w")
+                b.configure(text=f"{icon}   {label}",anchor="w",
+                    font=ctk.CTkFont("Segoe UI",12,"bold" if key not in ("license","help") else "normal"))
             else:
-                b.configure(text=icon,anchor="center")
+                # Small short label stacked under the icon — collapsed
+                # mode only; expanded mode already shows the full name.
+                b.configure(text=f"{icon}\n{short}",anchor="center",
+                    font=ctk.CTkFont("Segoe UI",9,"bold" if key not in ("license","help") else "normal"))
 
     def _refresh_nav_highlight(self):
         for key,b in self._nav_btns.items():
@@ -1088,26 +1134,73 @@ class App(DnDCTk):
             self._gen_scroll._parent_canvas.configure(yscrollincrement=max(cur_incr*8,8))
         except Exception:
             pass
+        # Click-and-drag scrolling — hold the left mouse button anywhere
+        # on a card (or empty canvas background) and move up/down to
+        # scroll live, like a touch-scroll gesture. Cards fill nearly the
+        # entire canvas width/height, so binding only on the canvas
+        # itself leaves almost no exposed background to grab — this also
+        # binds on every card widget directly (see _bind_drag_scroll,
+        # called from _render_page after each card is built/rebound).
+        # Interactive sub-widgets (textboxes, the Regenerate button)
+        # aren't touched, so editing/clicking still works exactly as
+        # before; a genuine drag only engages once the pointer has moved
+        # past a small threshold, so a plain click/edit never mis-fires
+        # as a scroll.
+        self._drag_scroll_active=False
+        def _drag_start(event):
+            self._drag_scroll_active=False  # not yet — only after real movement
+            self._drag_start_y=event.y_root
+            try:
+                self._drag_start_frac=self._gen_scroll._parent_canvas.yview()[0]
+            except Exception:
+                self._drag_start_frac=0.0
+        def _drag_motion(event):
+            canvas=self._gen_scroll._parent_canvas
+            dy=event.y_root-getattr(self,"_drag_start_y",event.y_root)
+            if not self._drag_scroll_active:
+                if abs(dy)<6:
+                    return  # still just a click/edit, not a drag yet
+                self._drag_scroll_active=True
+            try:
+                bbox=canvas.bbox("all")
+                if not bbox:
+                    return
+                total_h=bbox[3]-bbox[1]
+                view_h=canvas.winfo_height()
+                if total_h<=view_h:
+                    return
+                new_frac=self._drag_start_frac-(dy/total_h)
+                canvas.yview_moveto(max(0.0,min(1.0,new_frac)))
+            except Exception:
+                pass
+        def _drag_end(event):
+            self._drag_scroll_active=False
+        self._drag_scroll_handlers=(_drag_start,_drag_motion,_drag_end)
+        self._gen_scroll._parent_canvas.bind("<ButtonPress-1>",_drag_start,add="+")
+        self._gen_scroll._parent_canvas.bind("<B1-Motion>",_drag_motion,add="+")
+        self._gen_scroll._parent_canvas.bind("<ButtonRelease-1>",_drag_end,add="+")
 
         self._gen_empty_lbl=ctk.CTkLabel(self._gen_scroll,
             text="Results will appear here after generation.",
             font=ctk.CTkFont("Segoe UI",12),text_color=TXT3,fg_color="transparent")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
 
-        # Floating page-nav buttons — quick prev/next page without reaching
-        # for the header controls. Placed on `gen` (not `_gen_scroll`) so
-        # they float above the list instead of scrolling away with it.
+        # Floating scroll buttons — a mouse-wheel alternative for the
+        # current page's content, NOT page navigation (that's the ◀/▶
+        # Page Nav controls in the header). Placed on `gen` (not
+        # `_gen_scroll`) so they float above the list instead of
+        # scrolling away with it.
         self._scroll_down_btn=ctk.CTkButton(gen,text="▼",width=36,height=36,
             font=ctk.CTkFont("Segoe UI",14,"bold"),
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
-            command=lambda:self._go_page(1))
+            command=lambda:self._scroll_results(1))
         self._scroll_down_btn.place(relx=1.0,rely=1.0,x=-14,y=-14,anchor="se")
         self._scroll_up_btn=ctk.CTkButton(gen,text="▲",width=36,height=36,
             font=ctk.CTkFont("Segoe UI",14,"bold"),
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
-            command=lambda:self._go_page(-1))
+            command=lambda:self._scroll_results(-1))
         self._scroll_up_btn.place(relx=1.0,rely=1.0,x=-14,y=-56,anchor="se")
         self._scroll_down_btn.lift(); self._scroll_up_btn.lift()
 
@@ -1241,6 +1334,25 @@ class App(DnDCTk):
         # visible panel, even once the drop itself worked.
         if hasattr(self,"_smart_frame"):
             self._smart_frame.refresh_file_count()
+        self._prefetch_all_thumbnails(new)
+
+    def _prefetch_all_thumbnails(self,paths):
+        """Warms the disk cache for the WHOLE imported batch right away,
+        not just whichever page happens to be on screen — so paging
+        through a large batch later hits the cache instantly instead of
+        generating thumbnails on demand per page. Runs on a small fixed
+        pool of background threads (never the main thread, never touches
+        any widget) so a 5,000-image import can't spawn thousands of
+        threads at once."""
+        def _worker(chunk):
+            for p in chunk:
+                prefetch_thumb_to_cache(p,size=(MetaResultCard.THUMB_SIZE,MetaResultCard.THUMB_SIZE))
+                prefetch_thumb_to_cache(p,min_edge=CompactEditCard.THUMB_MIN_EDGE)
+        n_workers=4
+        chunks=[paths[i::n_workers] for i in range(n_workers)]
+        for c in chunks:
+            if c:
+                threading.Thread(target=_worker,args=(c,),daemon=True).start()
 
     def _import_with_progress(self,paths):
         """Record every path in small batches (so the event loop is never
@@ -1288,7 +1400,17 @@ class App(DnDCTk):
     def _on_results_resize(self,event=None):
         """Debounced: recompute Compact's auto-fit column count on resize,
         and only actually re-render if that count changed (otherwise a
-        window drag would re-render the whole page on every pixel)."""
+        window drag would re-render the whole page on every pixel).
+        Guards on width FIRST, before even scheduling the debounce timer
+        — a pure window move (not resize) still fires <Configure> on
+        child widgets in some window managers even though nothing about
+        this widget's own size changed, which was showing up as cards
+        deforming/reforming just from dragging the window around."""
+        w=getattr(event,"width",None) if event is not None else None
+        if w is not None and w==getattr(self,"_last_results_width",None):
+            return
+        if w is not None:
+            self._last_results_width=w
         if self._resize_after_id:
             try: self.after_cancel(self._resize_after_id)
             except Exception: pass
@@ -1307,6 +1429,28 @@ class App(DnDCTk):
         except Exception:
             w=1
         return max(1,min(6,w//self.CARD_MIN_W))
+
+    def _bind_drag_scroll(self,card):
+        """Attaches the same drag-to-scroll gesture (see its setup in
+        _build_content) directly onto a card widget and its thumbnail —
+        cards fill nearly the whole canvas, so without this there's
+        barely any exposed background left to grab. Interactive
+        sub-widgets (textboxes, Regenerate) are deliberately left alone;
+        clicking/editing those still works exactly as before, and a
+        small movement threshold in the shared handler means a plain
+        click never mis-fires as a scroll."""
+        if not hasattr(self,"_drag_scroll_handlers"):
+            return
+        start,motion,end=self._drag_scroll_handlers
+        for w in (card, getattr(card,"_tlbl",None)):
+            if w is None:
+                continue
+            try:
+                w.bind("<ButtonPress-1>",start,add="+")
+                w.bind("<B1-Motion>",motion,add="+")
+                w.bind("<ButtonRelease-1>",end,add="+")
+            except Exception:
+                pass
 
     def _render_page(self):
         """The one and only card renderer. Reuses a pool of already-built
@@ -1350,15 +1494,35 @@ class App(DnDCTk):
 
         size=max(int(self.page_size_var.get() or 50),1)
         working_view=self.working_view_var.get()
-        working_paths=[p for p in self._all_paths if self._results.get(p,{}).get("status")=="working"] \
+        WV_GRACE_SECONDS=3.0
+        working_set=set()
+        recently_done=[]
+        if working_view:
+            now=time.time()
+            wv_done=getattr(self,"_wv_recently_done",{})
+            # Expire anything past the grace window so it doesn't linger
+            # forever once generation is otherwise idle.
+            for p in list(wv_done.keys()):
+                if now-wv_done[p]>WV_GRACE_SECONDS:
+                    del wv_done[p]
+            for p in self._all_paths:
+                st=self._results.get(p,{}).get("status")
+                if st=="working":
+                    working_set.add(p)
+                elif p in wv_done:
+                    recently_done.append(p)
+        # Recently-finished cards are shown FIRST (that's the one the
+        # user just watched complete and wants to actually read), then
+        # whatever's still in flight — instead of yanking a card away
+        # the instant it's done, per feedback that Working View only
+        # gave a "blink" before swapping to the next one.
+        working_paths=(recently_done+[p for p in self._all_paths if p in working_set]) \
             if working_view else []
         if working_view and working_paths:
-            # Working View — the display IS the currently in-flight batch,
-            # not a static page. No pagination concept applies here: as
-            # each finishes, the next one already queued behind it (the
-            # worker pool always keeps exactly `concurrency` slots busy)
-            # takes its place live via the same _update_card hook that
-            # already fires on every status change.
+            # Working View — the display IS the currently in-flight batch
+            # (plus anything that just finished, held briefly so it's
+            # actually readable), not a static page. No pagination
+            # concept applies here.
             page_paths=working_paths
             n_pages=1
             self._current_page=0
@@ -1390,7 +1554,7 @@ class App(DnDCTk):
                     if compact:
                         self._request_thumb(path,card._tlbl,min_edge=CompactEditCard.THUMB_MIN_EDGE)
                     else:
-                        self._request_thumb(path,card._tlbl)
+                        self._request_thumb(path,card._tlbl,size=(MetaResultCard.THUMB_SIZE,MetaResultCard.THUMB_SIZE))
                 else:
                     card.apply_result(result)
             else:
@@ -1403,6 +1567,7 @@ class App(DnDCTk):
                         on_redo=lambda p=path:self._redo_single(p),mode=self.current_mode,
                         request_thumb=self._request_thumb,expanded=True,
                         on_toggle_expand=None,show_desc=show_desc)
+                self._bind_drag_scroll(card)
                 pool.append(card)
             card.grid(row=i//cols,column=i%cols,sticky="new",padx=4,pady=4)
             new_card_by_path[path]=card
@@ -1415,7 +1580,12 @@ class App(DnDCTk):
 
         self._card_by_path=new_card_by_path
         if working_view and working_paths:
-            self._page_lbl.configure(text=f"⟳ Working ({len(working_paths)})")
+            n_active=len(working_set)
+            n_done=len(recently_done)
+            if n_done:
+                self._page_lbl.configure(text=f"⟳ Working ({n_active})  ✓ ({n_done})")
+            else:
+                self._page_lbl.configure(text=f"⟳ Working ({n_active})")
         else:
             self._page_lbl.configure(text=f"Page {self._current_page+1}/{n_pages}")
         self._refresh_view_settings_ui()
@@ -1439,6 +1609,24 @@ class App(DnDCTk):
             try: self.after_cancel(self._wv_refresh_after_id)
             except Exception: pass
         self._wv_refresh_after_id=self.after(60,self._render_page)
+        self._schedule_wv_sweep()
+
+    def _schedule_wv_sweep(self):
+        """A completed card's grace period (see _render_page) needs to
+        expire even if nothing else happens to trigger a re-render in
+        the meantime — this is what actually removes it once its 3s is
+        up, rather than leaving it stuck until the next real completion
+        happens to come along."""
+        if getattr(self,"_wv_sweep_after_id",None):
+            try: self.after_cancel(self._wv_sweep_after_id)
+            except Exception: pass
+        def _sweep():
+            if self.working_view_var.get() and self.ai_running:
+                self._render_page()
+                self._wv_sweep_after_id=self.after(1000,_sweep)
+            else:
+                self._wv_sweep_after_id=None
+        self._wv_sweep_after_id=self.after(1000,_sweep)
 
     def _rebuild_card_pools(self):
         """Full teardown — only needed when the underlying file list or
@@ -1455,6 +1643,16 @@ class App(DnDCTk):
                 except Exception: pass
             setattr(self,pool_attr,[])
         self._card_by_path={}
+
+    def _scroll_results(self,direction):
+        """Mouse-wheel-equivalent scroll for the results grid — moves the
+        view within the CURRENT page's content, same as one wheel click.
+        Never changes which page you're on (that's _go_page, wired to
+        the Page Nav ◀/▶ buttons instead)."""
+        try:
+            self._gen_scroll._parent_canvas.yview_scroll(direction,"units")
+        except Exception:
+            pass
 
     def _go_page(self,delta):
         self._current_page+=delta
@@ -1552,6 +1750,10 @@ class App(DnDCTk):
         self._gen_btn.configure(text="✨  Generate (0)")
         self._update_progress()
         self._update_dropzone_visibility()
+        # Wipe cached thumbnails too — background thread since the cache
+        # folder can hold thousands of files; this never touches
+        # prefs.json (different folder, see clear_thumb_cache's own note).
+        threading.Thread(target=clear_thumb_cache,daemon=True).start()
 
     def _clear_results(self):
         self._rebuild_card_pools()
@@ -1580,6 +1782,11 @@ class App(DnDCTk):
         card=self._card_by_path.get(path)
         if card is not None:
             card.apply_result(self._results.get(path,{}))
+        status=self._results.get(path,{}).get("status")
+        if status in ("done","failed"):
+            if not hasattr(self,"_wv_recently_done"):
+                self._wv_recently_done={}
+            self._wv_recently_done[path]=time.time()
         self._maybe_refresh_working_view()
 
     # ── Pause / Stop ───────────────────────────────────────────────
@@ -1685,8 +1892,8 @@ class App(DnDCTk):
                 if self.ai_stop_flag or epoch!=self._gen_epoch: return
                 fname=os.path.basename(path)
                 self._results[path]={"status":"working"}
-                self.after(0,lambda p=path:self._update_card(p))
-                self.after(0,lambda f=fname,n=i+1,t=total:
+                self._ui_action_queue.put(lambda p=path:self._update_card(p))
+                self._ui_action_queue.put(lambda f=fname,n=i+1,t=total:
                     self._update_progress(done=done_count,total=t,
                         msg=f"⟳  [{n}/{t}] {f}"))
                 try:
@@ -1694,7 +1901,8 @@ class App(DnDCTk):
                     if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
                         raise ValueError("Vector/video: convert to JPG first")
                     raw,provider,model_id,key_idx=call_with_failover(path,prompt,self.prefs,
-                        status_cb=lambda msg:self.after(0,lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
+                        status_cb=lambda msg:self._ui_action_queue.put(
+                            lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
                     if epoch!=self._gen_epoch: return
                     self._last_ai_provider,self._last_ai_model=provider,model_id
                     model_used=f"⚙ {provider} · {model_label(provider,model_id)}" + \
@@ -1779,11 +1987,11 @@ class App(DnDCTk):
                         self._results[path]={"status":"done",
                             "prompt":raw.strip(),"model_used":model_used}
                     with lock: done_count+=1
-                    self.after(0,lambda p=path:self._update_card(p))
+                    self._ui_action_queue.put(lambda p=path:self._update_card(p))
                 except Exception as e:
                     self._results[path]={"status":"failed","error":str(e)[:120]}
-                    self.after(0,lambda p=path:self._update_card(p))
-                self.after(0,lambda n=done_count,t=total:
+                    self._ui_action_queue.put(lambda p=path:self._update_card(p))
+                self._ui_action_queue.put(lambda n=done_count,t=total:
                     self._update_progress(done=n,total=t))
             except Exception:
                 # Safety net only — process_one already catches its own
@@ -1792,7 +2000,7 @@ class App(DnDCTk):
                 pass
 
         self._task_mgr.run_batch(targets, process_one, max_workers=concurrency,
-            on_all_done=lambda: self.after(0,self._gen_done))
+            on_all_done=lambda: setattr(self,"_gen_done_flag",True))
 
     def _gen_done(self):
         self.ai_running=False; self._ai_paused=False
@@ -1975,7 +2183,7 @@ class App(DnDCTk):
     def _check_et(self):
         def _c():
             et=find_exiftool()
-            self.after(0,lambda:self.sb_et.configure(
+            self._ui_action_queue.put(lambda:self.sb_et.configure(
                 text="ExifTool · ready" if et else "ExifTool · missing",
                 text_color=GRN if et else RED_BTN))
         threading.Thread(target=_c,daemon=True).start()
