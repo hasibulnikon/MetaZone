@@ -69,7 +69,7 @@ class MetaResultCard(ctk.CTkFrame):
         self._show_desc=show_desc
         self._build(on_redo)
         if request_thumb:
-            request_thumb(self.path,self._tlbl)
+            request_thumb(self.path,self._tlbl,size=(self.THUMB_SIZE,self.THUMB_SIZE))
         else:
             threading.Thread(target=self._load_thumb,daemon=True).start()
 
