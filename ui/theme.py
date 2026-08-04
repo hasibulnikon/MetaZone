@@ -48,7 +48,20 @@ def _darken(hex_color,amount):
 def generate_bg_ladder(base_hex):
     """One background color -> the full BG1-BG4/GLASS/border ladder,
     each step a little lighter than the last so panels/cards/borders
-    stay visually distinct while reading as one consistent shade."""
+    stay visually distinct while reading as one consistent shade.
+
+    NAV_BG is separate from this ladder's usual "lighter each step"
+    direction — the nav rail needs to visually read as its own region
+    against the main content (BG1), not just another panel shade. Darkens
+    BG1 when there's room to (the normal case); when BG1 is already at or
+    near black, darkening further wouldn't be visible, so it lightens
+    slightly instead — either way, nav never ends up looking the same as
+    the content behind it."""
+    r,g,b=_hex_to_rgb(base_hex)
+    very_light=(r+g+b)>650  # a hypothetical light theme — none of the
+                             # current presets are, but this keeps the
+                             # logic correct if one's ever added
+    nav_bg=_darken(base_hex,9) if very_light else _lighten(base_hex,9)
     return {
         "BG1":base_hex,
         "BG2":_lighten(base_hex,7),
@@ -56,6 +69,7 @@ def generate_bg_ladder(base_hex):
         "BG4":_lighten(base_hex,24),
         "GLASS":_lighten(base_hex,10),
         "GLASS_BDR":_lighten(base_hex,32),
+        "NAV_BG":nav_bg,
     }
 
 def generate_accent_variants(base_hex):
@@ -73,10 +87,7 @@ _prefs=load_prefs()
 _bg_base=_prefs.get("theme_bg_base")
 _accent_base=_prefs.get("theme_accent_base")
 
-_bg=generate_bg_ladder(_bg_base) if _bg_base else {
-    "BG1":"#0a0a0a","BG2":"#111111","BG3":"#1a1a1a","BG4":"#222222",
-    "GLASS":"#161616","GLASS_BDR":"#2a2a2a",
-}
+_bg=generate_bg_ladder(_bg_base) if _bg_base else generate_bg_ladder("#0a0a0a")
 _accent=generate_accent_variants(_accent_base) if _accent_base else {
     "ACCENT":"#00c853","ACCENT_H":"#00a040","ACCENT_DIM":"#00331a",
 }
@@ -85,6 +96,7 @@ _accent=generate_accent_variants(_accent_base) if _accent_base else {
 # status colors (danger/warning) are NOT user-customizable by request,
 # so they stay fixed regardless of theme choice. ──────────────────────
 BG1=_bg["BG1"]; BG2=_bg["BG2"]; BG3=_bg["BG3"]; BG4=_bg["BG4"]
+NAV_BG=_bg["NAV_BG"]
 GLASS=_bg["GLASS"]; GLASS_BDR=_bg["GLASS_BDR"]; GLASS_BDR_AC=_accent["ACCENT"]
 TXT="#f0f0f0"; TXT2="#a0a0a0"; TXT3="#505050"
 GRN=_accent["ACCENT"]; GRN_H=_accent["ACCENT_H"]; GRN_DIM=_accent["ACCENT_DIM"]
