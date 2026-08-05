@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.6.4 — Generation-preview downscaling, nav reorder/contrast
+
+- **Large upscaled images made Metadata Generation slow (8-15MB, very
+  high resolution)** — Standard Workflow now does what Smart Workflow
+  already did: before the actual AI call, a downscaled ~1280px-long-edge
+  JPEG preview is generated and cached, and *that* gets sent to the AI
+  instead of the full original. Upload/processing time scales with file
+  size, not with how much detail an AI needs to write a title/
+  description/keywords, so this is where the slowdown was actually
+  coming from. Small images that are already under 1280px skip this
+  entirely and use the original untouched. Verified: a 4000×3000 test
+  image correctly downscales to 1280×960 and caches (cold ~0.6s, cached
+  ~0.16ms); confirmed via a real generation run that the large image's
+  AI call received the cached preview path while a small image's call
+  received its own original path unchanged. Clear All now also wipes
+  this cache (separate from the thumbnail cache, same never-touches-
+  prefs.json guarantee).
+- Nav reordered to: Home, Metadata, Embed, Prompt, P2P, Smart, API,
+  Setting, License, Help.
+- Nav rail now has its own background shade, visually distinct from the
+  main content behind it, in both collapsed and expanded states —
+  derived from whichever base background color is chosen, so it adapts
+  correctly across all three theme presets rather than being a fixed
+  color.
+
+**Not done yet, sizable and flagged rather than rushed:** the Prompt-to-
+Prompt "Image to Prompt" mode (upload example images, generate prompts
+from them) with its own drag-and-drop zone, thumbnail grid, Text/Image
+mode toggle, word counters, Clear All, and the 35/65 layout change — this
+is a substantial new feature and layout rework, not a small addition, and
+deserves a dedicated pass rather than being squeezed in at the end of an
+already-large round.
+
 ## v0.6.3 — Recurring freeze root-caused, Working View readability, drag-scroll, and a bug batch
 
 **Item 5, the recurring "Not Responding" freeze:** found a second, much more
