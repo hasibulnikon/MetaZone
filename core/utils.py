@@ -105,6 +105,82 @@ def set_window_icon(window):
         except Exception:
             pass
 
+GEN_PREVIEW_MAX_SIDE = 1280
+
+def _gen_preview_cache_dir():
+    """Separate from the thumbnail cache — these are full-quality-enough
+    JPEGs meant for the AI to actually analyze, not tiny display
+    thumbnails, so they're kept in their own subfolder even though both
+    live under the same common MetaZone folder."""
+    try:
+        from core.config import _common_pref_dir
+        base = os.path.join(_common_pref_dir(), ".cache", "gen_previews")
+    except Exception:
+        base = os.path.join(os.path.expanduser("~"), ".metazone_cache", "gen_previews")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        return None
+    return base
+
+def prepare_generation_preview(path, max_side=GEN_PREVIEW_MAX_SIDE):
+    """Resolves the path that should actually be SENT to the AI for
+    metadata generation. For a large/high-res original (the 8-15MB
+    upscaled-image case this exists for) this returns a cached, already-
+    downscaled JPEG instead — same visual content, dramatically smaller
+    upload — which is exactly what made generation slow for those files
+    in the first place: the network upload and the provider's own image
+    processing both scale with file size, not with how much detail an
+    AI actually needs to write a title/description/keywords.
+
+    Returns the ORIGINAL path unchanged (never raises, never blocks
+    generation) when: the file is a vector/video (no raster preview
+    possible), it's already at or under max_side on its long edge (a
+    preview would just be a same-size recompress, not worth the extra
+    file), or anything about building one fails."""
+    try:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
+            return path
+        cache_dir = _gen_preview_cache_dir()
+        if not cache_dir:
+            return path
+        key = _thumb_cache_key(path, f"genprev{max_side}")
+        cache_path = os.path.join(cache_dir, key + ".jpg")
+        if os.path.exists(cache_path):
+            return cache_path
+        img = Image.open(path)
+        w, h = img.size
+        if max(w, h) <= max_side:
+            return path  # already small enough — original is fine as-is
+        img = img.convert("RGB")
+        scale = max_side / float(max(w, h))
+        new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        img.save(cache_path, "JPEG", quality=90)
+        _thumb_cache_cleanup(cache_dir)
+        return cache_path
+    except Exception:
+        return path
+
+def clear_gen_preview_cache():
+    """Wipes cached generation previews — same never-touches-prefs.json
+    guarantee as clear_thumb_cache, since this only ever looks inside its
+    own .cache/gen_previews subfolder."""
+    cache_dir = _gen_preview_cache_dir()
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return 0
+    n = 0
+    for entry in os.listdir(cache_dir):
+        p = os.path.join(cache_dir, entry)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                n += 1
+        except Exception:
+            pass
+    return n
+
 def clear_thumb_cache():
     """Wipes every cached thumbnail file. Deliberately only ever touches
     files INSIDE the .cache/thumbs folder — prefs.json lives one level up
