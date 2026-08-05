@@ -13,13 +13,13 @@ from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
-from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache
+from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache, prepare_generation_preview, clear_gen_preview_cache
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
 from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
-from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
+from ui.theme import (BG1,BG2,BG3,BG4,NAV_BG,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_BTN_H,AMB_DIM,
     CYAN,ABSOLUTE_BG,VIRT_BUFFER)
 from ui.dnd import DnDCTk, DND_AVAILABLE, DND_FILES
@@ -240,7 +240,7 @@ class App(DnDCTk):
     def _build_global_nav(self,shell):
         NAV_W_EXPANDED=210
         NAV_W_COLLAPSED=64
-        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W_COLLAPSED)
+        nav=ctk.CTkFrame(shell,fg_color=NAV_BG,corner_radius=0,width=NAV_W_COLLAPSED)
         nav.grid(row=0,column=0,sticky="nsew"); nav.grid_propagate(False)
         self._nav_w_expanded=NAV_W_EXPANDED
         self._nav_w_collapsed=NAV_W_COLLAPSED
@@ -259,10 +259,10 @@ class App(DnDCTk):
         items=[
             ("dashboard","🏠","Dashboard","Home",False),
             ("metadata_gen","📝","Meta Generator","Metadata",False),
-            ("smart","🚀","Smart Workflow","Smart",False),
             ("embedder","📦","Meta Embedder","Embed",False),
             ("prompt_gen","✨","Prompt Generator","Prompt",False),
             ("prompt_to_prompt","🔄","Prompt to Prompt","P2P",False),
+            ("smart","🚀","Smart Workflow","Smart",False),
             ("ai_providers","🤖","API Manager","API",False),
             ("settings","⚙","Settings","Setting",False),
             ("license","🔑","License","License",True),
@@ -1754,6 +1754,7 @@ class App(DnDCTk):
         # folder can hold thousands of files; this never touches
         # prefs.json (different folder, see clear_thumb_cache's own note).
         threading.Thread(target=clear_thumb_cache,daemon=True).start()
+        threading.Thread(target=clear_gen_preview_cache,daemon=True).start()
 
     def _clear_results(self):
         self._rebuild_card_pools()
@@ -1900,7 +1901,8 @@ class App(DnDCTk):
                     ext=os.path.splitext(path)[1].lower()
                     if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
                         raise ValueError("Vector/video: convert to JPG first")
-                    raw,provider,model_id,key_idx=call_with_failover(path,prompt,self.prefs,
+                    send_path=prepare_generation_preview(path)
+                    raw,provider,model_id,key_idx=call_with_failover(send_path,prompt,self.prefs,
                         status_cb=lambda msg:self._ui_action_queue.put(
                             lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
                     if epoch!=self._gen_epoch: return
