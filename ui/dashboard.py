@@ -158,27 +158,6 @@ class DashboardPage(ctk.CTkFrame):
         for i, (key, label) in enumerate(ai_items):
             self._ai_rows[key] = _kv_row(self._ai_box, label, "—", i)
 
-        self._insights_box = _section(row2, "Productivity Insights", "🏆")
-        self._insight_rows = {}
-        insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
-                          ("requests_saved", "Est. Requests Saved"),
-                          ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
-        for i, (key, label) in enumerate(insight_items):
-            self._insight_rows[key] = _kv_row(self._insights_box, label, "—", i)
-        # Hidden for now — replaced on-screen by the Quick Actions grid
-        # below, which now occupies this exact spot (columns 2-3 of this
-        # row). Refresh logic keeps running so the numbers stay current
-        # for whenever this comes back.
-
-        self._sys_box = _section(row2, "System Status")
-        self._sys_rows = {}
-        sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
-                     ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
-                     ("smart", "Smart Workflow")]
-        for i, (key, label) in enumerate(sys_items):
-            self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
-        # Also hidden — see note above.
-
         # Quick Actions now sits where Productivity Insights + System
         # Status used to be (columns 2-3 of row2), sized to their exact
         # combined footprint, as a 2-column x 3-row grid.
@@ -223,6 +202,31 @@ class DashboardPage(ctk.CTkFrame):
         self._chart_canvas = tkinter.Canvas(chart_box, height=180, bg=BG2,
             highlightthickness=0)
         self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 12))
+
+        # Productivity Insights + System Status — previously hidden when
+        # Quick Actions took their old spot; now shown at the bottom of
+        # the page instead of being dropped entirely.
+        row4 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
+        row4.pack(fill="x", pady=(0, 16))
+        row4.grid_columnconfigure(0, weight=1); row4.grid_columnconfigure(1, weight=1)
+
+        self._insights_box = _section(row4, "Productivity Insights", "🏆")
+        self._insights_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self._insight_rows = {}
+        insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
+                          ("requests_saved", "Est. Requests Saved"),
+                          ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
+        for i, (key, label) in enumerate(insight_items):
+            self._insight_rows[key] = _kv_row(self._insights_box, label, "—", i)
+
+        self._sys_box = _section(row4, "System Status")
+        self._sys_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self._sys_rows = {}
+        sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
+                     ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
+                     ("smart", "Smart Workflow")]
+        for i, (key, label) in enumerate(sys_items):
+            self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
 
     # ── refresh ─────────────────────────────────────────────────────
     def _auto_refresh(self):
