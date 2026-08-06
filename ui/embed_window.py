@@ -1,6 +1,6 @@
 """Embed Metadata tab window — batch-writes CSV metadata into image/
 vector/video files via ExifTool."""
-import os, sys, csv, re, subprocess, threading, time
+import os, sys, csv, re, subprocess, threading, time, queue
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
 from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one, set_window_icon
@@ -31,6 +31,19 @@ class EmbedContent(ctk.CTkFrame):
         self.replace_filename_var=BooleanVar(value=False)
         self._task_mgr=TaskManager()
         self._rename_lock=threading.Lock()
+        # Embedding runs up to 6 rows in parallel (TaskManager/ThreadPoolExecutor),
+        # each reporting progress the instant it finishes — that means up to 6
+        # background threads (plus TaskManager's own watcher thread for the
+        # final on_all_done) all wanting to touch the UI concurrently. Calling
+        # self.after() directly from a background thread is the exact pattern
+        # already root-caused elsewhere in this app to silently corrupt Tcl's
+        # internal state and freeze the whole window — and this path is hotter
+        # than either of those (once per ROW, with real concurrency, not once
+        # per batch from a single thread). Every UI touch from a worker thread
+        # goes through this queue instead; only the poll below, running on the
+        # main thread via self.after, ever calls a Tk method.
+        self._ui_action_queue=queue.Queue()
+        self.after(30,self._poll_ui_actions)
         self._build()
         # Auto-load whatever was just generated, so "generate then embed" is
         # a one-click flow instead of re-browsing for the CSV and folder.
@@ -39,6 +52,20 @@ class EmbedContent(ctk.CTkFrame):
             self.folder_status.configure(text=f"✓ {os.path.basename(folder_path)}",
                 fg_color=GRN_DIM,text_color=GRN)
         if csv_path: self._do_load_csv(csv_path)
+
+    def _poll_ui_actions(self):
+        try:
+            for _ in range(200):
+                self._ui_action_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(30,self._poll_ui_actions)
+        except Exception:
+            pass
 
     def _build(self):
         self.grid_columnconfigure(0,weight=1); self.grid_columnconfigure(1,weight=0,minsize=260)
@@ -160,6 +187,40 @@ class EmbedContent(ctk.CTkFrame):
         self._log=ctk.CTkTextbox(log_panel,font=ctk.CTkFont("Consolas",10),
             fg_color=LOG_BG,text_color=TXT,corner_radius=8,state="disabled")
         self._log.grid(row=1,column=0,sticky="nsew",padx=10,pady=(0,10))
+
+        # Catch-all drop target covering the WHOLE page, not just the two
+        # narrow CSV/File-Location rows. Same bug class already found and
+        # fixed once for Smart Workflow ("raised panel covered Standard's
+        # drop targets, was never registered as one itself" — v0.6): the
+        # popup embedder is small enough that its two drop rows fill most
+        # of the window, so it's hard to miss them; the full-page embedder
+        # sits inside the much bigger main window with a lot of open space
+        # around those same two rows, and dropping anywhere outside their
+        # exact bounds previously landed on nothing registered at all.
+        # Registering `self` (and `body`) means a drop ANYWHERE on this
+        # page now resolves to something — a .csv routes to the CSV
+        # loader, anything else (a folder, or a stray image/video file) to
+        # the File Location handler — matching what a person actually
+        # expects when dropping "onto the embedder", not just onto one
+        # specific row of it.
+        self._register_generic_drop([self,body])
+
+    def _register_generic_drop(self,widgets):
+        if not DND_AVAILABLE: return
+        for w in widgets:
+            try:
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind("<<Drop>>",self._on_generic_drop)
+            except Exception: pass
+
+    def _on_generic_drop(self,event):
+        raw=event.data
+        paths=[p.strip('{}') for p in raw.split('} {')] if '{' in raw else raw.split()
+        paths=[p.strip('{}') for p in paths]
+        if not paths: return event.action
+        if paths[0].lower().endswith(".csv") and os.path.isfile(paths[0]):
+            return self._on_csv_drop(event)
+        return self._on_folder_drop(event)
 
     def _section(self,parent,num,title,cmd,row):
         f=ctk.CTkFrame(parent,fg_color=GLASS,corner_radius=10,border_width=1,border_color=GLASS_BDR)
@@ -328,7 +389,7 @@ class EmbedContent(ctk.CTkFrame):
                 os.rename(fp,new_path)
                 return new_path
             except Exception as ex:
-                self.after(0,lambda e=str(ex):self._log_msg(f"⚠  Rename failed: {e}"))
+                self._ui_action_queue.put(lambda e=str(ex):self._log_msg(f"⚠  Rename failed: {e}"))
                 return None
 
     def _start(self):
@@ -350,7 +411,7 @@ class EmbedContent(ctk.CTkFrame):
         fresh=find_exiftool()
         if fresh: et=fresh
         elif not os.path.exists(et):
-            self.after(0,lambda:(self._log_msg(f"✗  ExifTool not found at {et}"),
+            self._ui_action_queue.put(lambda:(self._log_msg(f"✗  ExifTool not found at {et}"),
                 messagebox.showerror("ExifTool",
                     "exiftool.exe is missing. Place it next to Meta Zone's "
                     "own .exe (not a system PATH install) and try again.",parent=self),
@@ -364,8 +425,8 @@ class EmbedContent(ctk.CTkFrame):
         replace_fn=self.replace_filename_var.get()
         total=len(self.csv_rows)
         finder=find_recursive if use_sub else find_file
-        self.after(0,lambda:self._log_msg(f"▶  Started — {total} rows"))
-        self.after(0,lambda:(self._embed_prog_bar.set(0),
+        self._ui_action_queue.put(lambda:self._log_msg(f"▶  Started — {total} rows"))
+        self._ui_action_queue.put(lambda:(self._embed_prog_bar.set(0),
             self._embed_counts_lbl.configure(text=f"0 succeeded  ·  0 failed  ·  0 not found")))
 
         counts={"ok":0,"skipped":0,"errors":0}
@@ -383,12 +444,12 @@ class EmbedContent(ctk.CTkFrame):
             fn=(row.get(col_f) or "").strip()
             if not fn:
                 with lock: counts["skipped"]+=1; done[0]+=1
-                self.after(0,_update_progress_ui)
+                self._ui_action_queue.put(_update_progress_ui)
                 return
             fp=finder(folder,fn,use_ext)
             if not fp:
                 with lock: counts["skipped"]+=1; done[0]+=1
-                self.after(0,lambda f=fn:(self._log_msg(f"⚠  Not found: {f}"),_update_progress_ui()))
+                self._ui_action_queue.put(lambda f=fn:(self._log_msg(f"⚠  Not found: {f}"),_update_progress_ui()))
                 return
             title=(row.get(col_t) or "").strip() if col_t and col_t!="(skip)" else ""
             kw_raw=(row.get(col_k) or "").strip() if col_k and col_k!="(skip)" else ""
@@ -401,14 +462,14 @@ class EmbedContent(ctk.CTkFrame):
                     new_path=self._rename_to_title(fp,title)
                     if new_path: final_name=os.path.basename(new_path)
                 with lock: counts["ok"]+=1; done[0]+=1
-                self.after(0,lambda fn=final_name:(self._log_msg(f"✓  {fn}"),_update_progress_ui()))
+                self._ui_action_queue.put(lambda fn=final_name:(self._log_msg(f"✓  {fn}"),_update_progress_ui()))
             else:
                 with lock: counts["errors"]+=1; done[0]+=1
-                self.after(0,lambda fn=actual,e=msg:(self._log_msg(f"✗  {fn} — {e}"),_update_progress_ui()))
+                self._ui_action_queue.put(lambda fn=actual,e=msg:(self._log_msg(f"✗  {fn} — {e}"),_update_progress_ui()))
 
         def _finish():
             summary=f"{counts['ok']} embedded · {counts['skipped']} not found · {counts['errors']} errors"
-            self.after(0,lambda:(self._log_msg(f"● Done — {summary}"),
+            self._ui_action_queue.put(lambda:(self._log_msg(f"● Done — {summary}"),
                 self._embed_prog_bar.set(1.0),_update_progress_ui(),
                 self._emb_btn.configure(state="normal",text="▶  Start Again"),
                 setattr(self,'embed_running',False)))
