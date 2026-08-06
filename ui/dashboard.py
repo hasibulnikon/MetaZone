@@ -158,9 +158,7 @@ class DashboardPage(ctk.CTkFrame):
         for i, (key, label) in enumerate(ai_items):
             self._ai_rows[key] = _kv_row(self._ai_box, label, "—", i)
 
-        # Quick Actions now sits where Productivity Insights + System
-        # Status used to be (columns 2-3 of row2), sized to their exact
-        # combined footprint, as a 2-column x 3-row grid.
+        # Quick Actions sits in columns 2-3 of row2, as before.
         qa_box = ctk.CTkFrame(row2, fg_color="transparent", corner_radius=0)
         qa_box.grid(row=0, column=2, columnspan=2, sticky="nsew", padx=(6, 0))
         qa_box.grid_columnconfigure((0, 1), weight=1)
@@ -178,18 +176,49 @@ class DashboardPage(ctk.CTkFrame):
                 fg_color=color, hover_color=color, text_color=TXT, corner_radius=8,
                 command=cmd).grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
 
-        # Recent Activity + Chart
-        row3 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row3.pack(fill="x", pady=(0, 16))
-        row3.grid_columnconfigure(0, weight=1); row3.grid_columnconfigure(1, weight=2)
+        # Recent Activity + Productivity Insights + System Status — one
+        # row, three equal-width columns. Productivity Insights and
+        # System Status used to be built but never gridded (hidden behind
+        # Quick Actions); they now have a real home instead of just
+        # running their refresh logic for nothing.
+        row_mid = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
+        row_mid.pack(fill="x", pady=(0, 16))
+        for i in range(3): row_mid.grid_columnconfigure(i, weight=1, uniform="row_mid")
 
-        self._activity_box = _section(row3, "Recent Activity")
+        self._activity_box = _section(row_mid, "Recent Activity")
         self._activity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self._activity_list = ctk.CTkFrame(self._activity_box, fg_color="transparent")
         self._activity_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=(0, 12))
 
-        chart_box = _section(row3, "Activity (Last 7 Days)")
-        chart_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self._insights_box = _section(row_mid, "Productivity Insights", "🏆")
+        self._insights_box.grid(row=0, column=1, sticky="nsew", padx=6)
+        self._insight_rows = {}
+        insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
+                          ("requests_saved", "Est. Requests Saved"),
+                          ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
+        for i, (key, label) in enumerate(insight_items):
+            self._insight_rows[key] = _kv_row(self._insights_box, label, "—", i)
+
+        self._sys_box = _section(row_mid, "System Status")
+        self._sys_box.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
+        self._sys_rows = {}
+        sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
+                     ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
+                     ("smart", "Smart Workflow")]
+        for i, (key, label) in enumerate(sys_items):
+            self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
+
+        # Activity chart moves to its own row below, full width — it
+        # doesn't need to be this tall on its own, so its canvas height
+        # drops from 180 to 90 (it used to have to fill the same row
+        # height as Recent Activity's ~7 rows of text; on its own row it
+        # only needs enough height for the plot itself).
+        row_bottom = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
+        row_bottom.pack(fill="x", pady=(0, 16))
+        row_bottom.grid_columnconfigure(0, weight=1)
+
+        chart_box = _section(row_bottom, "Activity (Last 7 Days)")
+        chart_box.grid(row=0, column=0, sticky="nsew")
         legend = ctk.CTkFrame(chart_box, fg_color="transparent")
         legend.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 4))
         for key, color in CHART_COLORS.items():
@@ -199,34 +228,9 @@ class DashboardPage(ctk.CTkFrame):
                 font=ctk.CTkFont("Segoe UI", 12)).pack(side="left")
             ctk.CTkLabel(dot, text=CHART_LABELS[key], text_color=TXT3, fg_color="transparent",
                 font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=(2, 0))
-        self._chart_canvas = tkinter.Canvas(chart_box, height=180, bg=BG2,
+        self._chart_canvas = tkinter.Canvas(chart_box, height=90, bg=BG2,
             highlightthickness=0)
         self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 12))
-
-        # Productivity Insights + System Status — previously hidden when
-        # Quick Actions took their old spot; now shown at the bottom of
-        # the page instead of being dropped entirely.
-        row4 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row4.pack(fill="x", pady=(0, 16))
-        row4.grid_columnconfigure(0, weight=1); row4.grid_columnconfigure(1, weight=1)
-
-        self._insights_box = _section(row4, "Productivity Insights", "🏆")
-        self._insights_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self._insight_rows = {}
-        insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
-                          ("requests_saved", "Est. Requests Saved"),
-                          ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
-        for i, (key, label) in enumerate(insight_items):
-            self._insight_rows[key] = _kv_row(self._insights_box, label, "—", i)
-
-        self._sys_box = _section(row4, "System Status")
-        self._sys_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        self._sys_rows = {}
-        sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
-                     ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
-                     ("smart", "Smart Workflow")]
-        for i, (key, label) in enumerate(sys_items):
-            self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
 
     # ── refresh ─────────────────────────────────────────────────────
     def _auto_refresh(self):
@@ -243,6 +247,44 @@ class DashboardPage(ctk.CTkFrame):
         self._refresh_activity()
         self._refresh_chart()
 
+    def _apply(self, widget, text, color=None):
+        """Update a label's text (and optionally color) only if it
+        actually changed. CTkLabel.configure() forces a full internal
+        redraw on every call regardless of whether the value is
+        different — calling it on 20+ widgets every 4 seconds, all at
+        once, is what made the whole dashboard look like it was
+        blinking. Skipping the no-op calls removes that; a genuine
+        change gets a brief highlight pulse instead of an instant snap."""
+        text = str(text)
+        try:
+            changed = widget.cget("text") != text
+        except Exception:
+            changed = True
+        if color is not None:
+            try:
+                changed = changed or widget.cget("text_color") != color
+            except Exception:
+                pass
+        if not changed:
+            return
+        kwargs = {"text": text}
+        if color is not None:
+            kwargs["text_color"] = color
+        widget.configure(**kwargs)
+        self._pulse(widget, color)
+
+    def _pulse(self, widget, base_color=None):
+        """Subtle ~250ms highlight flash on a value that just changed.
+        CTkLabel has no real alpha channel to fade, so this pulses the
+        text color toward the accent and back instead — enough motion
+        to say "this number moved" without being a jarring snap."""
+        try:
+            base = base_color if base_color is not None else widget.cget("text_color")
+            widget.configure(text_color=CYAN)
+            widget.after(220, lambda: widget.configure(text_color=base))
+        except Exception:
+            pass
+
     def _set_card(self, key, value, sub=""):
         card = self._today_cards[key]
         children = card.winfo_children()
@@ -251,11 +293,11 @@ class DashboardPage(ctk.CTkFrame):
         # from this ordering automatically.
         packed = [w for w in children if str(w.winfo_manager()) == "pack"]
         if len(packed) >= 2:
-            packed[1].configure(text=str(value))  # value label
+            self._apply(packed[1], value)  # value label
         if card._corner_lbl is not None:
-            card._corner_lbl.configure(text=sub)
+            self._apply(card._corner_lbl, sub)
         elif len(packed) > 3:
-            packed[3].configure(text=sub)
+            self._apply(packed[3], sub)
 
     def _refresh_today(self):
         t = stats_db.today_summary()
@@ -279,19 +321,19 @@ class DashboardPage(ctk.CTkFrame):
     def _refresh_lifetime(self):
         lt = stats_db.lifetime_summary()
         for key, lbl in self._lifetime_rows.items():
-            lbl.configure(text=f"{lt.get(key, 0):,}")
+            self._apply(lbl, f"{lt.get(key, 0):,}")
 
     def _refresh_ai_usage(self):
         lt = stats_db.lifetime_summary()
         provider = getattr(self.app, "_last_ai_provider", None) or "—"
         model = getattr(self.app, "_last_ai_model", None) or "—"
-        self._ai_rows["provider"].configure(text=provider)
-        self._ai_rows["model"].configure(text=model)
-        self._ai_rows["requests"].configure(text=f"{lt['total_api_requests']:,}")
-        self._ai_rows["requests_saved"].configure(text=f"{lt['total_api_requests_saved']:,}",
-            text_color=GRN if lt["total_api_requests_saved"] else TXT)
-        self._ai_rows["cost"].configure(text=f"${lt['est_api_cost']:.2f}")
-        self._ai_rows["cost_saved"].configure(text=f"${lt['est_api_cost_saved']:.2f}", text_color=GRN)
+        self._apply(self._ai_rows["provider"], provider)
+        self._apply(self._ai_rows["model"], model)
+        self._apply(self._ai_rows["requests"], f"{lt['total_api_requests']:,}")
+        self._apply(self._ai_rows["requests_saved"], f"{lt['total_api_requests_saved']:,}",
+            color=GRN if lt["total_api_requests_saved"] else TXT)
+        self._apply(self._ai_rows["cost"], f"${lt['est_api_cost']:.2f}")
+        self._apply(self._ai_rows["cost_saved"], f"${lt['est_api_cost_saved']:.2f}", color=GRN)
 
     def _refresh_insights(self):
         lt = stats_db.lifetime_summary()
@@ -305,39 +347,48 @@ class DashboardPage(ctk.CTkFrame):
         speed = None
         if lt["total_processing_seconds"] > 0 and lt["total_files_processed"] > 0:
             speed = lt["total_files_processed"] / (lt["total_processing_seconds"] / 60)
-        self._insight_rows["week"].configure(text=f"{week_total:,}")
-        self._insight_rows["hours_saved"].configure(text=f"{hours_saved:.1f} h")
-        self._insight_rows["requests_saved"].configure(text=f"{lt['total_api_requests_saved']:,}")
-        self._insight_rows["avg_score"].configure(
-            text=f"{avg_score_row:.1f}%" if avg_score_row is not None else "—")
-        self._insight_rows["speed"].configure(
-            text=f"{speed:.1f} img/min" if speed else "—")
+        self._apply(self._insight_rows["week"], f"{week_total:,}")
+        self._apply(self._insight_rows["hours_saved"], f"{hours_saved:.1f} h")
+        self._apply(self._insight_rows["requests_saved"], f"{lt['total_api_requests_saved']:,}")
+        self._apply(self._insight_rows["avg_score"],
+            f"{avg_score_row:.1f}%" if avg_score_row is not None else "—")
+        self._apply(self._insight_rows["speed"],
+            f"{speed:.1f} img/min" if speed else "—")
 
     def _refresh_system(self):
         running = getattr(self.app, "ai_running", False)
-        self._sys_rows["worker"].configure(text="Active" if running else "Idle",
-            text_color=GRN if running else TXT3)
+        self._apply(self._sys_rows["worker"], "Active" if running else "Idle",
+            color=GRN if running else TXT3)
         bg = 1 if running else 0
         sw = getattr(getattr(self.app, "_smart_frame", None), "pipeline", None)
         sw_running = bool(sw and sw.stage and sw.stage != "complete")
         if sw_running: bg += 1
-        self._sys_rows["bg_tasks"].configure(text=str(bg))
-        self._sys_rows["queue"].configure(text="Processing" if running else "Empty")
+        self._apply(self._sys_rows["bg_tasks"], str(bg))
+        self._apply(self._sys_rows["queue"], "Processing" if running else "Empty")
         if _HAS_PSUTIL:
             try:
-                self._sys_rows["cpu"].configure(text=f"{psutil.cpu_percent(interval=0):.0f}%")
-                self._sys_rows["ram"].configure(text=f"{psutil.virtual_memory().percent:.0f}%")
+                self._apply(self._sys_rows["cpu"], f"{psutil.cpu_percent(interval=0):.0f}%")
+                self._apply(self._sys_rows["ram"], f"{psutil.virtual_memory().percent:.0f}%")
             except Exception:
-                self._sys_rows["cpu"].configure(text="—"); self._sys_rows["ram"].configure(text="—")
+                self._apply(self._sys_rows["cpu"], "—"); self._apply(self._sys_rows["ram"], "—")
         else:
-            self._sys_rows["cpu"].configure(text="—"); self._sys_rows["ram"].configure(text="—")
-        self._sys_rows["smart"].configure(text="Running" if sw_running else "Idle",
-            text_color=AMB_BTN if sw_running else TXT3)
+            self._apply(self._sys_rows["cpu"], "—"); self._apply(self._sys_rows["ram"], "—")
+        self._apply(self._sys_rows["smart"], "Running" if sw_running else "Idle",
+            color=AMB_BTN if sw_running else TXT3)
 
     def _refresh_activity(self):
+        rows = stats_db.recent_activity(6)
+        # Recent Activity rebuilt its whole widget tree (destroy + recreate
+        # every row) on EVERY 4s tick regardless of whether anything had
+        # actually happened — that full teardown/rebuild is a much bigger
+        # visual flash than a plain text update, and is the main thing that
+        # made "everything blinking" complaint accurate. Only rebuild when
+        # the underlying rows actually differ from last time.
+        if rows == getattr(self, "_last_activity_rows", None):
+            return
+        self._last_activity_rows = rows
         for w in self._activity_list.winfo_children():
             w.destroy()
-        rows = stats_db.recent_activity(6)
         if not rows:
             ctk.CTkLabel(self._activity_list, text="No activity yet.",
                 font=ctk.CTkFont("Segoe UI", 12), text_color=TXT3,
@@ -379,12 +430,25 @@ class DashboardPage(ctk.CTkFrame):
 
     def _refresh_chart(self):
         c = self._chart_canvas
-        c.delete("all")
         c.update_idletasks()
-        w = max(c.winfo_width(), 200); h = 180
+        w = max(c.winfo_width(), 200)
+        days, series = stats_db.last_n_days_series(7)
+        cache_key = (w, days, tuple(tuple(v) for v in series.values()))
+        # Same fix as Recent Activity: a canvas delete("all")+full redraw
+        # every 4s reads as a flash even though the underlying numbers
+        # rarely change that often. Skip it entirely when nothing that
+        # would actually change the drawing (width or the 7-day series)
+        # has changed since last time.
+        if cache_key == getattr(self, "_last_chart_key", None):
+            return
+        self._last_chart_key = cache_key
+        c.delete("all")
+        try:
+            h = int(c.cget("height"))
+        except Exception:
+            h = 180
         pad_l, pad_r, pad_t, pad_b = 34, 10, 10, 20
         plot_w, plot_h = max(w - pad_l - pad_r, 10), h - pad_t - pad_b
-        days, series = stats_db.last_n_days_series(7)
         max_v = max([1] + [v for s in series.values() for v in s])
         # gridlines
         for i in range(4):
