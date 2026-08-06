@@ -1,7 +1,7 @@
 """Reusable result-list widgets: the bulk-import progress dialog and
 the per-file metadata result card (thumbnail, title/description/
 keywords, status, regenerate)."""
-import os, threading, tkinter
+import os, threading, tkinter, queue
 import customtkinter as ctk
 from core.utils import make_thumb, format_filesize
 from ui.theme import (BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
@@ -71,7 +71,31 @@ class MetaResultCard(ctk.CTkFrame):
         if request_thumb:
             request_thumb(self.path,self._tlbl,size=(self.THUMB_SIZE,self.THUMB_SIZE))
         else:
+            # Fallback path for a card built without a shared thumbnail
+            # pool. Never call a Tk method from the background thread
+            # itself (self.after() included) — that's the exact pattern
+            # already root-caused to freeze this app elsewhere; the
+            # thread only ever puts the finished image on a plain queue,
+            # and only the main-thread poll below (scheduled via
+            # self.after from __init__, not from the thread) touches Tk.
+            self._own_thumb_q=queue.Queue()
             threading.Thread(target=self._load_thumb,daemon=True).start()
+            self.after(30,self._poll_own_thumb)
+
+    def _poll_own_thumb(self):
+        try:
+            img=self._own_thumb_q.get_nowait()
+        except queue.Empty:
+            try:
+                if self.winfo_exists():
+                    self.after(30,self._poll_own_thumb)
+            except Exception: pass
+            return
+        try:
+            if self.winfo_exists():
+                self._tlbl.configure(image=img,text="")
+                self._tlbl._image=img
+        except Exception: pass
 
     def _build(self,on_redo):
         if not self._expanded:
@@ -429,8 +453,7 @@ class MetaResultCard(ctk.CTkFrame):
         s=self.THUMB_SIZE-2
         img=make_thumb(self.path,(s,s))
         if img:
-            self.after(0,lambda:(self._tlbl.configure(image=img,text=""),
-                setattr(self._tlbl,"_image",img)))
+            self._own_thumb_q.put(img)
 
 
 class ModernDropdown(ctk.CTkFrame):
@@ -548,56 +571,58 @@ class CompactEditCard(ctk.CTkFrame):
         self._build(on_redo,request_thumb)
 
     def _build(self,on_redo,request_thumb):
-        self.grid_columnconfigure(1,weight=1)
+        # v0.7: single vertical stack — Thumbnail, then the Status Badge
+        # directly below it, then Filename, then the metadata snippets.
+        # (Previously the status label sat over on the thumbnail's right
+        # side, grouped in with the metadata column instead of the
+        # thumbnail it's actually reporting on.)
+        self.grid_columnconfigure(0,weight=1)
 
-        # Left: thumbnail + filename + filesize, stacked.
-        left=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
-        left.grid(row=0,column=0,sticky="n",padx=(10,10),pady=10)
-
-        self._tlbl=ctk.CTkLabel(left,text="🖼",font=ctk.CTkFont("Segoe UI",22),
+        self._tlbl=ctk.CTkLabel(self,text="🖼",font=ctk.CTkFont("Segoe UI",22),
             fg_color=BG4,text_color=TXT3,width=self.THUMB_MIN_EDGE,
             height=self.THUMB_MIN_EDGE,corner_radius=6)
-        self._tlbl.pack()
+        self._tlbl.grid(row=0,column=0,pady=(10,6))
         if request_thumb:
             request_thumb(self.path,self._tlbl,min_edge=self.THUMB_MIN_EDGE)
 
+        self._status_lbl=ctk.CTkLabel(self,text="",font=ctk.CTkFont("Segoe UI",9,"bold"),
+            fg_color="transparent",anchor="center")
+        self._status_lbl.grid(row=1,column=0,sticky="ew",pady=(0,4))
+
         fname=os.path.basename(self.path)
-        self._fname_lbl=ctk.CTkLabel(left,text=(fname[:20]+"…") if len(fname)>20 else fname,
+        self._fname_lbl=ctk.CTkLabel(self,text=(fname[:24]+"…") if len(fname)>24 else fname,
             font=ctk.CTkFont("Segoe UI",9,"bold"),text_color=TXT2,
             fg_color="transparent",anchor="center")
-        self._fname_lbl.pack(pady=(6,0))
+        self._fname_lbl.grid(row=2,column=0,sticky="ew")
         try:
             size_txt=format_filesize(self.path)
         except Exception:
             size_txt=""
-        self._size_lbl=ctk.CTkLabel(left,text=size_txt,font=ctk.CTkFont("Segoe UI",8),
+        self._size_lbl=ctk.CTkLabel(self,text=size_txt,font=ctk.CTkFont("Segoe UI",8),
             text_color=TXT3,fg_color="transparent",anchor="center")
-        self._size_lbl.pack()
+        self._size_lbl.grid(row=3,column=0,sticky="ew",pady=(0,8))
 
-        # Right: snippet rows + status + regenerate.
-        right=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
-        right.grid(row=0,column=1,sticky="new",padx=(0,10),pady=10)
-        right.grid_columnconfigure(0,weight=1)
+        meta=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
+        meta.grid(row=4,column=0,sticky="ew",padx=10)
+        meta.grid_columnconfigure(0,weight=1)
         self._snippet_lbls={}
 
         if self.mode=="prompt":
-            self._snippet_row(right,0,"prompt","Prompt",CYAN)
+            self._snippet_row(meta,0,"prompt","Prompt",CYAN)
+            r=1
         else:
-            self._snippet_row(right,0,"title","Title",CYAN)
+            self._snippet_row(meta,0,"title","Title",CYAN)
             r=1
             if self.show_desc:
-                self._snippet_row(right,1,"desc","Description",TXT2)
+                self._snippet_row(meta,1,"desc","Description",TXT2)
                 r=2
-            self._kw_row(right,r)
+            self._kw_row(meta,r)
             r+=1
-        self._status_lbl=ctk.CTkLabel(right,text="",font=ctk.CTkFont("Segoe UI",9,"bold"),
-            fg_color="transparent",anchor="w")
-        self._status_lbl.grid(row=10,column=0,sticky="w",pady=(4,4))
-        self._redo_btn=ctk.CTkButton(right,text="⟳  Regenerate",height=26,
+        self._redo_btn=ctk.CTkButton(self,text="⟳  Regenerate",height=26,
             font=ctk.CTkFont("Segoe UI",10,"bold"),
             fg_color=BG4,hover_color=AMB_DIM,text_color=AMB_BTN,
             corner_radius=6,command=on_redo)
-        self._redo_btn.grid(row=11,column=0,sticky="ew")
+        self._redo_btn.grid(row=5,column=0,sticky="ew",padx=10,pady=(6,10))
 
         self._refresh_snippets()
         self._refresh_status()
