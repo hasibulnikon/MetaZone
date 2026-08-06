@@ -13,13 +13,13 @@ from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
-from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache, prepare_generation_preview, clear_gen_preview_cache
+from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
 from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
-from ui.theme import (BG1,BG2,BG3,BG4,NAV_BG,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
+from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_BTN_H,AMB_DIM,
     CYAN,ABSOLUTE_BG,VIRT_BUFFER)
 from ui.dnd import DnDCTk, DND_AVAILABLE, DND_FILES
@@ -27,6 +27,25 @@ from ui.api_dialog import APIManagerWindow
 from ui.embed_window import EmbedWindow
 from ui.widgets import ImportProgressDialog, MetaResultCard, ModernDropdown, CompactEditCard
 from workers.task_manager import TaskManager
+
+def _lerp_hex(c1,c2,t):
+    """Linear-interpolate between two '#rrggbb' colors at t in [0,1] —
+    the only building block the fade-in animations need, since CTk has
+    no real alpha channel to animate against."""
+    t=max(0.0,min(1.0,t))
+    r1,g1,b1=int(c1[1:3],16),int(c1[3:5],16),int(c1[5:7],16)
+    r2,g2,b2=int(c2[1:3],16),int(c2[3:5],16),int(c2[5:7],16)
+    r=round(r1+(r2-r1)*t); g=round(g1+(g2-g1)*t); b=round(b1+(b2-b1)*t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def _fmt_secs(s):
+    """Human-readable duration for the Processing Queue's ETA field."""
+    s=max(0,int(s))
+    if s<60: return f"{s}s"
+    m,s=divmod(s,60)
+    if m<60: return f"{m}m {s}s"
+    h,m=divmod(m,60)
+    return f"{h}h {m}m"
 
 class App(DnDCTk):
     VERSION=APP_VERSION
@@ -53,6 +72,7 @@ class App(DnDCTk):
         self._ai_paused=False; self.current_mode="meta"
         self._path_idx={}; self._source_folder=""
         self._gen_epoch=0
+        self._gen_retry_count=0  # Processing Queue panel's "Retries" stat
         self._show_desc_mode=True
         self._task_mgr=TaskManager()
         self._gen_done_flag=False
@@ -69,14 +89,13 @@ class App(DnDCTk):
         # from a main-thread-scheduled after() loop means NO Tk call
         # ever happens off the main thread for this path.
         self._last_ai_provider=None; self._last_ai_model=None
-        # View Settings — Expanded (1-4 user-selectable columns) or Compact
-        # (columns auto-fit to the available width). Both render through
-        # the single paginated-grid renderer — see _render_page below.
+        # View Settings — Expanded or Compact. Column count is no longer
+        # user-chosen: both modes auto-fit columns to the available width
+        # (see _auto_grid_cols), and there is no pagination at all any
+        # more — every loaded image renders in one continuously
+        # scrolling grid (see _render_page).
         self.view_mode_var=StringVar(value=self.prefs.get("view_mode","expanded"))
-        self.grid_cols_var=IntVar(value=self.prefs.get("grid_cols",1))
-        self.page_size_var=IntVar(value=self.prefs.get("page_size",50))
         self.working_view_var=BooleanVar(value=self.prefs.get("working_view",False))
-        self._current_page=0
 
         # AI settings
         self.ai_title_var    =StringVar(value=str(self.prefs.get("title_len",130)))
@@ -238,20 +257,19 @@ class App(DnDCTk):
         self._nav_to("dashboard")
 
     def _build_global_nav(self,shell):
-        NAV_W_EXPANDED=210
-        NAV_W_COLLAPSED=64
-        nav=ctk.CTkFrame(shell,fg_color=NAV_BG,corner_radius=0,width=NAV_W_COLLAPSED)
+        # v0.7: the expandable/collapsible sidebar is gone. There is now
+        # exactly one nav style — the icon-over-short-label "compact" one
+        # that used to be the collapsed state — permanently. No toggle
+        # button, no expanded (icon+long-label, 210px-wide) mode, no
+        # runtime width switching. Icons got noticeably bigger (a plain
+        # CTkButton can't mix two font sizes in one string, so each item
+        # is now a small compound widget — an icon label over a name
+        # label — instead of a single-font button) and labels are
+        # unchanged text at +1pt.
+        NAV_W=76
+        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W)
         nav.grid(row=0,column=0,sticky="nsew"); nav.grid_propagate(False)
-        self._nav_w_expanded=NAV_W_EXPANDED
-        self._nav_w_collapsed=NAV_W_COLLAPSED
-        self._nav_expanded=False
-
-        self._nav_toggle_btn=ctk.CTkButton(nav,text="☰",anchor="center",
-            height=38,width=NAV_W_COLLAPSED-16,
-            font=ctk.CTkFont("Segoe UI",13,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=8,
-            command=self._toggle_nav)
-        self._nav_toggle_btn.pack(fill="x",padx=8,pady=(16,8))
+        self._nav_w=NAV_W
 
         # Exact requested order: Dashboard, Meta Generator, Smart Workflow,
         # Meta Embedder, Prompt Generator, Prompt to Prompt, API Manager,
@@ -259,10 +277,10 @@ class App(DnDCTk):
         items=[
             ("dashboard","🏠","Dashboard","Home",False),
             ("metadata_gen","📝","Meta Generator","Metadata",False),
+            ("smart","🚀","Smart Workflow","Smart",False),
             ("embedder","📦","Meta Embedder","Embed",False),
             ("prompt_gen","✨","Prompt Generator","Prompt",False),
             ("prompt_to_prompt","🔄","Prompt to Prompt","P2P",False),
-            ("smart","🚀","Smart Workflow","Smart",False),
             ("ai_providers","🤖","API Manager","API",False),
             ("settings","⚙","Settings","Setting",False),
             ("license","🔑","License","License",True),
@@ -270,45 +288,46 @@ class App(DnDCTk):
         ]
         self._nav_items=items
         for key,icon,label,short,coming_soon in items:
-            b=ctk.CTkButton(nav,text=icon,anchor="center",height=42,width=NAV_W_COLLAPSED-16,
-                font=ctk.CTkFont("Segoe UI",14,"bold" if not coming_soon else "normal"),
-                fg_color="transparent",hover_color=BG3,
-                text_color=(TXT3 if coming_soon else TXT2),
-                corner_radius=8,command=lambda k=key:self._nav_to(k))
-            b.pack(fill="x",padx=8,pady=1)
-            self._nav_btns[key]=b
+            btn=self._make_nav_item(nav,key,icon,short,coming_soon)
+            btn.pack(fill="x",padx=6,pady=3)
+            self._nav_btns[key]=btn
         self._nav_frame=nav
-        self._apply_nav_labels()
 
-    def _toggle_nav(self):
-        """Menu button expands the vertical icon strip to icon+label width,
-        or collapses it back — the nav itself is ALWAYS the vertical icon
-        strip; expanding never turns it into anything else."""
-        self._nav_expanded=not self._nav_expanded
-        w=self._nav_w_expanded if self._nav_expanded else self._nav_w_collapsed
-        self._nav_frame.configure(width=w)
-        self._nav_toggle_btn.configure(width=w-16 if not self._nav_expanded else 0)
-        for b in self._nav_btns.values():
-            b.configure(width=w-16 if not self._nav_expanded else 0)
-        self._apply_nav_labels()
+    def _make_nav_item(self,parent,key,icon,short,coming_soon):
+        """One compound nav entry: a bigger icon glyph stacked over its
+        short label, in a plain frame that behaves like a button (click
+        anywhere on it navigates; hover/active recolor the whole frame).
+        Kept as a frame rather than a CTkButton specifically so the icon
+        and label can each have their own font size."""
+        item=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=8,height=58)
+        item.grid_propagate(False)
+        icon_lbl=ctk.CTkLabel(item,text=icon,font=ctk.CTkFont("Segoe UI",20),
+            fg_color="transparent",text_color=(TXT3 if coming_soon else TXT2))
+        icon_lbl.pack(pady=(9,0))
+        text_lbl=ctk.CTkLabel(item,text=short,font=ctk.CTkFont("Segoe UI",10,
+            "bold" if key not in ("license","help") else "normal"),
+            fg_color="transparent",text_color=(TXT3 if coming_soon else TXT2))
+        text_lbl.pack(pady=(1,7))
+        item._icon_lbl=icon_lbl; item._text_lbl=text_lbl; item._coming_soon=coming_soon
+        for w in (item,icon_lbl,text_lbl):
+            w.bind("<Button-1>",lambda e,k=key:self._nav_to(k))
+            w.bind("<Enter>",lambda e,it=item:self._nav_item_hover(it,True))
+            w.bind("<Leave>",lambda e,it=item:self._nav_item_hover(it,False))
+            w.configure(cursor="hand2")
+        return item
 
-    def _apply_nav_labels(self):
-        for key,icon,label,short,coming_soon in self._nav_items:
-            b=self._nav_btns[key]
-            if self._nav_expanded:
-                b.configure(text=f"{icon}   {label}",anchor="w",
-                    font=ctk.CTkFont("Segoe UI",12,"bold" if key not in ("license","help") else "normal"))
-            else:
-                # Small short label stacked under the icon — collapsed
-                # mode only; expanded mode already shows the full name.
-                b.configure(text=f"{icon}\n{short}",anchor="center",
-                    font=ctk.CTkFont("Segoe UI",9,"bold" if key not in ("license","help") else "normal"))
+    def _nav_item_hover(self,item,entering):
+        if item is self._nav_btns.get(self._nav_active):
+            return  # active item keeps its own highlight, hover doesn't override it
+        item.configure(fg_color=BG3 if entering else "transparent")
 
     def _refresh_nav_highlight(self):
-        for key,b in self._nav_btns.items():
+        for key,item in self._nav_btns.items():
             active=(key==self._nav_active)
-            b.configure(fg_color=GRN_DIM if active else "transparent",
-                        text_color=GRN if active else TXT2)
+            item.configure(fg_color=GRN_DIM if active else "transparent")
+            color=GRN if active else (TXT3 if item._coming_soon else TXT2)
+            item._icon_lbl.configure(text_color=color)
+            item._text_lbl.configure(text_color=color)
 
     def _ensure_lazy_page(self,key):
         if key in self._pages or key not in getattr(self,"_lazy_page_specs",{}):
@@ -910,8 +929,6 @@ class App(DnDCTk):
             "include_desc":self.ai_include_desc_var.get(),
             "content_type":self.ai_content_type_var.get(),
             "view_mode":self.view_mode_var.get(),
-            "grid_cols":int(self.grid_cols_var.get() or 1),
-            "page_size":int(self.page_size_var.get() or 50),
             "working_view":self.working_view_var.get(),
         })
         save_prefs(self.prefs)
@@ -1044,19 +1061,26 @@ class App(DnDCTk):
 
         self._register_drop_targets([ws,self._ws_empty])
 
-        # Progress bar
-        prog=ctk.CTkFrame(main,fg_color=BG1,corner_radius=0,height=36)
+        # Progress bar + Processing Queue stats strip (Current File is
+        # already the progress label's own message, e.g. "[12/40] x.jpg";
+        # this second row adds Completed/Remaining/ETA/Avg/Model/Retries,
+        # visible only while a batch is actually running).
+        prog=ctk.CTkFrame(main,fg_color=BG1,corner_radius=0,height=58)
         prog.grid(row=2,column=0,sticky="ew"); prog.grid_propagate(False)
         prog.grid_columnconfigure(1,weight=1)
         self._prog_lbl=ctk.CTkLabel(prog,text="● System Ready.",
             font=ctk.CTkFont("Segoe UI",10),text_color=TXT3,fg_color=BG1)
-        self._prog_lbl.grid(row=0,column=0,padx=(10,8),pady=4)
+        self._prog_lbl.grid(row=0,column=0,padx=(10,8),pady=(4,0))
         self._prog_bar=ctk.CTkProgressBar(prog,progress_color=GRN,fg_color=BG3,
             border_width=1,border_color=GLASS_BDR,height=14,corner_radius=7)
-        self._prog_bar.grid(row=0,column=1,sticky="ew",pady=11,padx=(0,8)); self._prog_bar.set(0)
+        self._prog_bar.grid(row=0,column=1,sticky="ew",pady=(9,0),padx=(0,8)); self._prog_bar.set(0)
         self._prog_pct=ctk.CTkLabel(prog,text="",font=ctk.CTkFont("Segoe UI",10,"bold"),
             text_color=GRN,fg_color=BG1,width=36)
-        self._prog_pct.grid(row=0,column=2,padx=(0,8))
+        self._prog_pct.grid(row=0,column=2,padx=(0,8),pady=(4,0))
+
+        self._proc_stats_lbl=ctk.CTkLabel(prog,text="",
+            font=ctk.CTkFont("Segoe UI",9),text_color=TXT3,fg_color=BG1,anchor="w")
+        self._proc_stats_lbl.grid(row=1,column=0,columnspan=3,sticky="ew",padx=10,pady=(2,4))
 
         # Generated Metadata section — 2x grid, 4 cards visible
         gen=ctk.CTkFrame(main,fg_color=GLASS,corner_radius=12,
@@ -1083,18 +1107,6 @@ class App(DnDCTk):
             fg_color="transparent",hover_color=BG3,text_color=TXT3,corner_radius=6,
             command=lambda:self._set_view_mode("compact"))
         self._view_compact_btn.pack(side="left",padx=(0,10))
-        self._cols_row=ctk.CTkFrame(vs,fg_color="transparent",corner_radius=0)
-        self._cols_row.pack(side="left")
-        ctk.CTkLabel(self._cols_row,text="Cols:",font=ctk.CTkFont("Segoe UI",10),
-            text_color=TXT3,fg_color="transparent").pack(side="left",padx=(0,4))
-        self._col_btns={}
-        for n in (1,2,3,4):
-            b=ctk.CTkButton(self._cols_row,text=str(n),width=26,height=26,
-                font=ctk.CTkFont("Segoe UI",10,"bold"),
-                fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
-                command=lambda n=n:self._set_grid_cols(n))
-            b.pack(side="left",padx=1)
-            self._col_btns[n]=b
 
         # Working View — while generating, show only the cards currently
         # being processed (advances live as each finishes), instead of
@@ -1108,30 +1120,26 @@ class App(DnDCTk):
             button_color=TXT,fg_color=GLASS_BDR,width=34,height=18,
             command=self._on_working_view_toggle).pack(side="left")
 
-        self._page_nav=ctk.CTkFrame(vs,fg_color="transparent",corner_radius=0)
-        self._page_nav.pack(side="left",padx=(10,0))
-        self._page_prev_btn=ctk.CTkButton(self._page_nav,text="◀",width=26,height=26,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
-            command=lambda:self._go_page(-1))
-        self._page_prev_btn.pack(side="left",padx=1)
-        self._page_lbl=ctk.CTkLabel(self._page_nav,text="Page 1/1",
-            font=ctk.CTkFont("Segoe UI",10),text_color=TXT2,fg_color="transparent",width=64)
-        self._page_lbl.pack(side="left",padx=4)
-        self._page_next_btn=ctk.CTkButton(self._page_nav,text="▶",width=26,height=26,
-            font=ctk.CTkFont("Segoe UI",11,"bold"),
-            fg_color=BG3,hover_color=BG4,text_color=TXT2,corner_radius=6,
-            command=lambda:self._go_page(1))
-        self._page_next_btn.pack(side="left",padx=1)
-        self._page_nav.pack_forget()  # only shown once paged-grid mode is active
+        # Total-count indicator — replaces the old Page 1/1 label now that
+        # there's no pagination; shows "N images" normally, or the
+        # Working View in-flight/just-finished counts while generating.
+        self._page_lbl=ctk.CTkLabel(vs,text="0 images",
+            font=ctk.CTkFont("Segoe UI",10),text_color=TXT2,fg_color="transparent")
+        self._page_lbl.pack(side="left",padx=(10,0))
         self._refresh_view_settings_ui()
 
         self._gen_scroll=ctk.CTkScrollableFrame(gen,fg_color="transparent",
             scrollbar_button_color=BG3,scrollbar_button_hover_color=BG4,corner_radius=0)
         self._gen_scroll.grid(row=1,column=0,sticky="nsew",padx=6,pady=(4,6))
+        # yscrollincrement=1 (not the old *8 speed hack): Tk's canvas
+        # quantizes yview_moveto to the nearest multiple of this value on
+        # at least some platforms/versions, which used to leave the
+        # scroll-button clamp (see _scroll_results) off by up to one
+        # increment. 1px makes that quantization a non-issue; the actual
+        # scroll distance per click is computed directly from real card
+        # geometry now, not from this value.
         try:
-            cur_incr=int(self._gen_scroll._parent_canvas.cget("yscrollincrement") or 1)
-            self._gen_scroll._parent_canvas.configure(yscrollincrement=max(cur_incr*8,8))
+            self._gen_scroll._parent_canvas.configure(yscrollincrement=1)
         except Exception:
             pass
         # Click-and-drag scrolling — hold the left mouse button anywhere
@@ -1195,13 +1203,20 @@ class App(DnDCTk):
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
             command=lambda:self._scroll_results(1))
-        self._scroll_down_btn.place(relx=1.0,rely=1.0,x=-14,y=-14,anchor="se")
+        # x=-38 (not -14): CTkScrollableFrame's own vertical scrollbar sits
+        # ~20px wide right at the results panel's right edge. At -14 these
+        # floating buttons sat directly on top of the bottom of that
+        # scrollbar's track — covering its draggable thumb and eating its
+        # clicks whenever the thumb happened to be near the bottom, which
+        # is exactly when it's most likely to need dragging. -38 clears it
+        # with a small gap.
+        self._scroll_down_btn.place(relx=1.0,rely=1.0,x=-38,y=-14,anchor="se")
         self._scroll_up_btn=ctk.CTkButton(gen,text="▲",width=36,height=36,
             font=ctk.CTkFont("Segoe UI",14,"bold"),
             fg_color=BG3,hover_color=BG4,text_color=TXT2,
             border_width=1,border_color=GLASS_BDR,corner_radius=18,
             command=lambda:self._scroll_results(-1))
-        self._scroll_up_btn.place(relx=1.0,rely=1.0,x=-14,y=-56,anchor="se")
+        self._scroll_up_btn.place(relx=1.0,rely=1.0,x=-38,y=-56,anchor="se")
         self._scroll_down_btn.lift(); self._scroll_up_btn.lift()
 
         # ── Card rendering ────────────────────────────────────────────
@@ -1394,8 +1409,8 @@ class App(DnDCTk):
         self._all_paths.append(path)
         self._results[path]={"status":"waiting"}
 
-    # ── Rendering (single paginated-grid renderer for every view mode) ──
-    CARD_MIN_W=340  # target width used to auto-fit Compact columns
+    # ── Rendering (single continuously-scrolling grid renderer, all
+    # view modes, no pagination) ──
 
     def _on_results_resize(self,event=None):
         """Debounced: recompute Compact's auto-fit column count on resize,
@@ -1418,17 +1433,23 @@ class App(DnDCTk):
 
     def _maybe_rerender_on_resize(self):
         self._resize_after_id=None
-        if self.view_mode_var.get()=="compact":
-            new_cols=self._auto_compact_cols()
-            if new_cols!=getattr(self,"_last_auto_cols",None):
-                self._render_page()
+        new_cols=self._auto_grid_cols()
+        if new_cols!=getattr(self,"_last_auto_cols",None):
+            self._render_page()
 
-    def _auto_compact_cols(self):
+    def _auto_grid_cols(self):
+        """Both view modes auto-fit their column count to the available
+        width now — no manual column picker. Expanded goes 2 cols in a
+        small window / 3 in a large one; Compact (narrower cards) goes
+        3 small / 4 large. Two fixed tiers per mode, not a continuous
+        card-width division, per spec."""
         try:
             w=self._gen_scroll.winfo_width() or 1
         except Exception:
             w=1
-        return max(1,min(6,w//self.CARD_MIN_W))
+        if self.view_mode_var.get()=="compact":
+            return 4 if w>=900 else 3
+        return 3 if w>=1100 else 2
 
     def _bind_drag_scroll(self,card):
         """Attaches the same drag-to-scroll gesture (see its setup in
@@ -1451,6 +1472,29 @@ class App(DnDCTk):
                 w.bind("<ButtonRelease-1>",end,add="+")
             except Exception:
                 pass
+
+    def _fade_in_card(self,card):
+        """Lightweight fade-in for a freshly created card widget (only
+        ever called the first time a pool slot is built — reused/rebound
+        cards never re-fade). CTk/Tk has no real alpha channel to
+        animate, so this interpolates the card's own background/border
+        color from the page background toward its real GLASS color over
+        ~180ms — the card visibly materializes without the cost of a
+        true transparency+slide animation. Duration and step count are
+        deliberately small; performance matters more than the effect."""
+        end_fg,end_bdr=GLASS,GLASS_BDR
+        steps=6
+        def _step(i):
+            try:
+                if not card.winfo_exists(): return
+                t=i/steps
+                card.configure(fg_color=_lerp_hex(BG1,end_fg,t),
+                                border_color=_lerp_hex(BG1,end_bdr,t))
+                if i<steps:
+                    card.after(30,lambda:_step(i+1))
+            except Exception:
+                pass
+        _step(0)
 
     def _render_page(self):
         """The one and only card renderer. Reuses a pool of already-built
@@ -1481,22 +1525,25 @@ class App(DnDCTk):
             for c in pool: c.grid_remove()
             self._card_by_path={}
             self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
-            self._page_lbl.configure(text="Page 1/1")
+            self._page_lbl.configure(text="0 images")
             self._refresh_view_settings_ui()
             return
         self._gen_empty_lbl.place_forget()
 
-        if compact:
-            cols=self._auto_compact_cols()
-            self._last_auto_cols=cols
-        else:
-            cols=max(1,min(int(self.grid_cols_var.get() or 1),4))
-
-        size=max(int(self.page_size_var.get() or 50),1)
+        cols=self._auto_grid_cols()
+        self._last_auto_cols=cols
         working_view=self.working_view_var.get()
-        WV_GRACE_SECONDS=3.0
-        working_set=set()
+
+        # No pagination and — per the new card-creation workflow — no
+        # placeholder cards either: a path only ever gets a card once its
+        # metadata is actually done (or failed). "waiting"/"working"
+        # paths simply have no widget at all until then; see the
+        # Processing Queue panel (raised over this grid while
+        # self.ai_running) for what to show meanwhile.
+        working_set=set()  # kept for the working_view grace-timer logic below;
+                            # always empty now since "working" cards never render
         recently_done=[]
+        WV_GRACE_SECONDS=3.0
         if working_view:
             now=time.time()
             wv_done=getattr(self,"_wv_recently_done",{})
@@ -1506,10 +1553,7 @@ class App(DnDCTk):
                 if now-wv_done[p]>WV_GRACE_SECONDS:
                     del wv_done[p]
             for p in self._all_paths:
-                st=self._results.get(p,{}).get("status")
-                if st=="working":
-                    working_set.add(p)
-                elif p in wv_done:
+                if p in wv_done:
                     recently_done.append(p)
         # Recently-finished cards are shown FIRST (that's the one the
         # user just watched complete and wants to actually read), then
@@ -1521,17 +1565,28 @@ class App(DnDCTk):
         if working_view and working_paths:
             # Working View — the display IS the currently in-flight batch
             # (plus anything that just finished, held briefly so it's
-            # actually readable), not a static page. No pagination
-            # concept applies here.
+            # actually readable), not the full list. This is a filter,
+            # not pagination — there's still no page concept underneath.
             page_paths=working_paths
-            n_pages=1
-            self._current_page=0
         else:
-            n_pages=max((total+size-1)//size,1)
-            self._current_page=max(0,min(self._current_page,n_pages-1))
-            start=self._current_page*size
-            end=min(start+size,total)
-            page_paths=self._all_paths[start:end]
+            # No pagination: every FINISHED image renders in this one
+            # continuously scrolling grid. Anything still waiting/working
+            # is intentionally excluded — see the docstring above.
+            page_paths=[p for p in self._all_paths
+                        if self._results.get(p,{}).get("status") in ("done","failed")]
+
+        if not page_paths:
+            for c in pool: c.grid_remove()
+            self._card_by_path={}
+            self._gen_empty_lbl.configure(text=(
+                "Generating… finished results will appear here as each image completes."
+                if self.ai_running else
+                "Results will appear here after generation."))
+            self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
+            self._page_lbl.configure(text="0 images")
+            self._refresh_view_settings_ui()
+            return
+        self._gen_empty_lbl.place_forget()
 
         for c in range(cols):
             self._gen_scroll.grid_columnconfigure(c,weight=1)
@@ -1569,6 +1624,7 @@ class App(DnDCTk):
                         on_toggle_expand=None,show_desc=show_desc)
                 self._bind_drag_scroll(card)
                 pool.append(card)
+                self._fade_in_card(card)
             card.grid(row=i//cols,column=i%cols,sticky="new",padx=4,pady=4)
             new_card_by_path[path]=card
 
@@ -1587,7 +1643,7 @@ class App(DnDCTk):
             else:
                 self._page_lbl.configure(text=f"⟳ Working ({n_active})")
         else:
-            self._page_lbl.configure(text=f"Page {self._current_page+1}/{n_pages}")
+            self._page_lbl.configure(text=f"{total} image{'s' if total!=1 else ''}")
         self._refresh_view_settings_ui()
 
     def _on_working_view_toggle(self):
@@ -1595,21 +1651,25 @@ class App(DnDCTk):
         save_prefs(self.prefs)
         self._render_page()
 
-    def _maybe_refresh_working_view(self):
-        """Called on every status transition during generation. Only
-        actually re-renders when Working View is on — debounced so a
-        burst of near-simultaneous transitions (e.g. concurrency=20 all
-        starting within the same tick) collapses into one render instead
-        of twenty, without losing any of them (each call reschedules to
-        the same short delay, so the last one in a burst wins and always
-        fires)."""
-        if not self.working_view_var.get():
+    def _maybe_refresh_working_view(self,force=False):
+        """Debounced re-render: collapses a burst of near-simultaneous
+        status transitions (e.g. concurrency=20 all finishing within the
+        same tick) into one render instead of twenty, without losing any
+        of them (each call reschedules to the same short delay, so the
+        last one in a burst wins and always fires). Fires whenever
+        Working View is on, OR force=True — force is set by _update_card
+        whenever a path just finished and doesn't have a card yet: since
+        cards are never created for waiting/working paths any more (see
+        _render_page), a newly "done" image needs an actual render to
+        appear at all, Working View or not."""
+        if not (self.working_view_var.get() or force):
             return
         if getattr(self,"_wv_refresh_after_id",None):
             try: self.after_cancel(self._wv_refresh_after_id)
             except Exception: pass
         self._wv_refresh_after_id=self.after(60,self._render_page)
-        self._schedule_wv_sweep()
+        if self.working_view_var.get():
+            self._schedule_wv_sweep()
 
     def _schedule_wv_sweep(self):
         """A completed card's grace period (see _render_page) needs to
@@ -1645,28 +1705,53 @@ class App(DnDCTk):
         self._card_by_path={}
 
     def _scroll_results(self,direction):
-        """Mouse-wheel-equivalent scroll for the results grid — moves the
-        view within the CURRENT page's content, same as one wheel click.
-        Never changes which page you're on (that's _go_page, wired to
-        the Page Nav ◀/▶ buttons instead)."""
+        """Move by ~2 card-heights per click, computed fresh from the
+        CURRENT canvas content every time — not from Tk's yscrollincrement
+        (platform/version-dependent; on at least one real build it
+        defaulted low enough that clicks barely moved at all) and not by
+        trusting the canvas's own scrollregion cache (cards keep
+        resizing/relaying-out live during generation, and Tk does not
+        automatically re-clamp an existing scroll position when
+        scrollregion shrinks after the fact — that's what let repeated
+        clicking near either end drift into space beyond the actual first
+        or last card, with nothing there to show and no snap-back).
+        Recomputing bbox("all") and re-deriving + clamping the target
+        fraction on every single click makes each click self-correcting
+        regardless of what happened to the layout since the last one."""
+        canvas=self._gen_scroll._parent_canvas
         try:
-            self._gen_scroll._parent_canvas.yview_scroll(direction,"units")
+            bbox=canvas.bbox("all")
+            if not bbox:
+                return
+            canvas.configure(scrollregion=bbox)  # sync before trusting it below
+            total_h=bbox[3]-bbox[1]
+            view_h=canvas.winfo_height() or 1
+            max_top_px=max(0,total_h-view_h)
+            if max_top_px<=0:
+                return  # everything already fits -- nothing to scroll, ever
+            card_h=self._representative_card_height() or 220
+            delta_px=card_h*2*direction
+            cur_top_px=canvas.yview()[0]*total_h
+            new_top_px=max(0,min(max_top_px,cur_top_px+delta_px))
+            canvas.yview_moveto(new_top_px/total_h)
         except Exception:
             pass
 
-    def _go_page(self,delta):
-        self._current_page+=delta
-        self._render_page()
+    def _representative_card_height(self):
+        """A real currently-rendered card's height, used so the scroll
+        buttons move a consistent, content-aware distance instead of a
+        guessed constant — Expanded and Compact cards are quite
+        different heights, and either can also vary with content."""
+        for c in self._card_by_path.values():
+            try:
+                h=c.winfo_height()
+                if h>1: return h
+            except Exception:
+                continue
+        return None
 
     def _set_view_mode(self,mode):
         self.view_mode_var.set(mode)
-        self._current_page=0
-        self._save_settings()
-        self._render_page()
-
-    def _set_grid_cols(self,n):
-        self.grid_cols_var.set(n)
-        self._current_page=0
         self._save_settings()
         self._render_page()
 
@@ -1678,22 +1763,6 @@ class App(DnDCTk):
         self._view_compact_btn.configure(
             fg_color="transparent" if expanded else GRN,
             text_color=TXT3 if expanded else ABSOLUTE_BG)
-        # Manual column choice only makes sense in Expanded — Compact
-        # always auto-fits as many columns as the window width allows.
-        if expanded:
-            self._cols_row.pack(side="left")
-            cur_cols=int(self.grid_cols_var.get() or 1)
-            for n,b in self._col_btns.items():
-                b.configure(fg_color=GRN if n==cur_cols else BG3,
-                            text_color=ABSOLUTE_BG if n==cur_cols else TXT2)
-        else:
-            self._cols_row.pack_forget()
-        total=len(self._all_paths)
-        size=max(int(self.page_size_var.get() or 50),1)
-        if total>size:
-            self._page_nav.pack(side="left",padx=(10,0))
-        else:
-            self._page_nav.pack_forget()
 
     def _sync_card_edits(self,path,card):
         """Read back whatever's currently in a card's editable text boxes
@@ -1716,7 +1785,9 @@ class App(DnDCTk):
         failed=sum(1 for r in self._results.values() if r.get("status")=="failed")
         if t==0:
             self._prog_lbl.configure(text="● System Ready.",text_color=TXT3)
-            self._prog_bar.set(0); self._prog_pct.configure(text=""); return
+            self._prog_bar.set(0); self._prog_pct.configure(text="")
+            self._proc_stats_lbl.configure(text="")
+            return
         self._prog_lbl.configure(
             text=msg or f"Generated {d}/{t}  |  {d} successful  |  {failed} failed",
             text_color=TXT2)
@@ -1726,6 +1797,28 @@ class App(DnDCTk):
         self.p_err.configure(text=f"✗  {failed} failed")
         self.p_pend.configure(text=f"○  {t-d-failed} pending")
         self._gen_count_lbl.configure(text=f"Generated Metadata ({d})")
+
+        # Processing Queue stats strip — Completed/Remaining/Avg/ETA/
+        # Model/Retries. Only meaningful (and only shown) while a batch
+        # is actually running; blank the rest of the time.
+        if self.ai_running and d+failed>0:
+            # max(..., 0.05): guards against elapsed coming out ~0 (or, in
+            # a race where _gen_start_time was captured a hair after this
+            # call, fractionally negative) right at a batch's very start
+            # — a tiny floor here instead of letting avg/ETA show a
+            # nonsense negative number for a moment.
+            elapsed=max(time.time()-getattr(self,"_gen_start_time",time.time()),0.05)
+            avg=elapsed/(d+failed)
+            remaining=max(t-d-failed,0)
+            eta=avg*remaining
+            model_bit=f"{self._last_ai_provider} · {self._last_ai_model}" \
+                if getattr(self,"_last_ai_provider",None) else "—"
+            self._proc_stats_lbl.configure(text=(
+                f"Completed: {d+failed}/{t}   ·   Remaining: {remaining}   ·   "
+                f"Avg: {avg:.1f}s/img   ·   Est. remaining: {_fmt_secs(eta)}   ·   "
+                f"Model: {model_bit}   ·   Retries: {self._gen_retry_count}"))
+        elif not self.ai_running:
+            self._proc_stats_lbl.configure(text="")
 
     def _update_dropzone_visibility(self):
         """The slim drop bar is only useful when the list is empty — once
@@ -1754,17 +1847,15 @@ class App(DnDCTk):
         # folder can hold thousands of files; this never touches
         # prefs.json (different folder, see clear_thumb_cache's own note).
         threading.Thread(target=clear_thumb_cache,daemon=True).start()
-        threading.Thread(target=clear_gen_preview_cache,daemon=True).start()
 
     def _clear_results(self):
         self._rebuild_card_pools()
         self._path_idx={}
-        self._current_page=0
         try: self._gen_scroll._parent_canvas.yview_moveto(0.0)
         except Exception: pass
         self._gen_count_lbl.configure(text="Generated Metadata (0)")
         self._gen_empty_lbl.place(x=0,y=40,relwidth=1)
-        self._page_lbl.configure(text="Page 1/1")
+        self._page_lbl.configure(text="0 images")
         try: self._embed_gen_btn.pack_forget()
         except Exception: pass
 
@@ -1784,11 +1875,19 @@ class App(DnDCTk):
         if card is not None:
             card.apply_result(self._results.get(path,{}))
         status=self._results.get(path,{}).get("status")
+        newly_finished=False
         if status in ("done","failed"):
             if not hasattr(self,"_wv_recently_done"):
                 self._wv_recently_done={}
             self._wv_recently_done[path]=time.time()
-        self._maybe_refresh_working_view()
+            if card is None:
+                # No card exists for this path yet (it was never
+                # "waiting"/"working" on screen — see _render_page) —
+                # this status transition is the ONLY moment it will ever
+                # get one, so a plain Working-View-off render must still
+                # happen here, not just when Working View is on.
+                newly_finished=True
+        self._maybe_refresh_working_view(force=newly_finished)
 
     # ── Pause / Stop ───────────────────────────────────────────────
     def _pause_ai(self):
@@ -1844,6 +1943,7 @@ class App(DnDCTk):
         self.ai_running=True; self.ai_stop_flag=False; self._ai_paused=False
         self._gen_epoch+=1; epoch=self._gen_epoch
         self._gen_start_time=time.time()
+        self._gen_retry_count=0
         self._gen_btn.configure(state="disabled",text="⟳  Generating…")
         self._pause_btn.pack(side="left",padx=(0,4),before=self._gen_btn)
         self._stop_btn.pack(side="left",padx=(0,5),before=self._gen_btn)
@@ -1901,8 +2001,7 @@ class App(DnDCTk):
                     ext=os.path.splitext(path)[1].lower()
                     if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
                         raise ValueError("Vector/video: convert to JPG first")
-                    send_path=prepare_generation_preview(path)
-                    raw,provider,model_id,key_idx=call_with_failover(send_path,prompt,self.prefs,
+                    raw,provider,model_id,key_idx=call_with_failover(path,prompt,self.prefs,
                         status_cb=lambda msg:self._ui_action_queue.put(
                             lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
                     if epoch!=self._gen_epoch: return
@@ -1959,6 +2058,7 @@ class App(DnDCTk):
                         # if the retry doesn't do better, keep whichever
                         # attempt got more keywords rather than failing.
                         if kn>0 and len(deduped)<kn*0.7:
+                            with lock: self._gen_retry_count+=1
                             try:
                                 retry_prompt=prompt+(
                                     f"\n\nIMPORTANT CORRECTION: your previous attempt only "
@@ -2006,6 +2106,18 @@ class App(DnDCTk):
 
     def _gen_done(self):
         self.ai_running=False; self._ai_paused=False
+        # Force a final render right away — cards only ever get created
+        # via the debounced _maybe_refresh_working_view render, and with
+        # a fast/high-concurrency batch it's possible for the very last
+        # completions to still have a pending debounce timer when the
+        # batch itself finishes. Without this, those last images could
+        # sit fully "done" in self._results but never actually get a
+        # card until something unrelated happened to trigger a render.
+        if getattr(self,"_wv_refresh_after_id",None):
+            try: self.after_cancel(self._wv_refresh_after_id)
+            except Exception: pass
+            self._wv_refresh_after_id=None
+        self._render_page()
         total=len(self._all_paths)
         done=sum(1 for r in self._results.values() if r.get("status")=="done")
         failed=sum(1 for r in self._results.values() if r.get("status") in ("failed","stopped"))
