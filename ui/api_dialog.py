@@ -1,6 +1,6 @@
 """Configuration popup — API Keys and Theme, as two pages behind a page
 selector at the top."""
-import threading
+import threading, queue
 import customtkinter as ctk
 from tkinter import messagebox, StringVar
 from core.constants import (AI_PROVIDERS, VISIBLE_PROVIDERS,
@@ -25,7 +25,28 @@ class APIManagerContent(ctk.CTkFrame):
         self.mode=mode
         self.prefs=prefs; self._cur=VISIBLE_PROVIDERS[0]
         self._page="keys" if mode=="api" else "theme"
+        # Key-validation runs on a background thread; it must never call
+        # a Tk method (self.after included) directly from that thread —
+        # confirmed elsewhere in this app to corrupt Tcl state over time
+        # and freeze the UI. Route results through a plain thread-safe
+        # queue, drained only from a main-thread-scheduled poll.
+        self._ui_action_queue=queue.Queue()
+        self.after(30,self._poll_ui_actions)
         self._build()
+
+    def _poll_ui_actions(self):
+        try:
+            for _ in range(50):
+                self._ui_action_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(30,self._poll_ui_actions)
+        except Exception:
+            pass
 
     def _tab_text(self,p):
         n=sum(1 for k in self.prefs.get("ai_keys",{}).get(p,[]) if k.get("active"))
@@ -235,7 +256,7 @@ class APIManagerContent(ctk.CTkFrame):
             vld_lbl.configure(text="⟳  Checking…",text_color=AMB_BTN)
             def _run():
                 ok,msg=validate_key(p,kv)
-                self.after(0,lambda:vld_lbl.configure(
+                self._ui_action_queue.put(lambda:vld_lbl.configure(
                     text="✓  Valid" if ok else f"✗  {msg}",text_color=GRN if ok else RED_BTN))
             threading.Thread(target=_run,daemon=True).start()
         entry.bind("<FocusOut>",_live_validate); entry.bind("<Return>",_live_validate)
@@ -295,7 +316,7 @@ class APIManagerContent(ctk.CTkFrame):
             lb.configure(text="⟳…",text_color=AMB_BTN)
             def _r():
                 ok,msg=validate_key(prov,kv2)
-                self.after(0,lambda:lb.configure(text="✓ OK" if ok else "✗ Bad",
+                self._ui_action_queue.put(lambda:lb.configure(text="✓ OK" if ok else "✗ Bad",
                     text_color=GRN if ok else RED_BTN))
             threading.Thread(target=_r,daemon=True).start()
         vl.bind("<Button-1>",_test)
