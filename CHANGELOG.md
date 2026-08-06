@@ -1,37 +1,126 @@
 # Changelog
 
-## v0.6.4 — Generation-preview downscaling, nav reorder/contrast
+## v0.7 — Complete UI/UX & Card System Refactor, plus the recurring freeze (again) and a scroll bug batch
 
-- **Large upscaled images made Metadata Generation slow (8-15MB, very
-  high resolution)** — Standard Workflow now does what Smart Workflow
-  already did: before the actual AI call, a downscaled ~1280px-long-edge
-  JPEG preview is generated and cached, and *that* gets sent to the AI
-  instead of the full original. Upload/processing time scales with file
-  size, not with how much detail an AI needs to write a title/
-  description/keywords, so this is where the slowdown was actually
-  coming from. Small images that are already under 1280px skip this
-  entirely and use the original untouched. Verified: a 4000×3000 test
-  image correctly downscales to 1280×960 and caches (cold ~0.6s, cached
-  ~0.16ms); confirmed via a real generation run that the large image's
-  AI call received the cached preview path while a small image's call
-  received its own original path unchanged. Clear All now also wipes
-  this cache (separate from the thumbnail cache, same never-touches-
-  prefs.json guarantee).
-- Nav reordered to: Home, Metadata, Embed, Prompt, P2P, Smart, API,
-  Setting, License, Help.
-- Nav rail now has its own background shade, visually distinct from the
-  main content behind it, in both collapsed and expanded states —
-  derived from whichever base background color is chosen, so it adapts
-  correctly across all three theme presets rather than being a fixed
-  color.
+**The freeze, found again:** a **third** live instance of the exact bug
+class already root-caused and fixed twice before (v0.6, v0.6.3) —
+`self.after()` called directly from a background thread. This one was in
+`embed_window.py`'s embedding pipeline, and it's the hottest instance yet:
+up to 6 concurrent worker threads (the embed batch's own thread pool) all
+doing it per-row, not once per batch from a single thread like the earlier
+two. Also found it in `api_dialog.py`'s key-validation thread, and a
+fourth, currently-dormant instance in a `widgets.py` thumbnail-loading
+fallback path. Fixed all three the same way as before — every UI touch
+from a worker thread now goes through a plain thread-safe queue, drained
+only by a main-thread-scheduled poll; no Tk call originates off the main
+thread anywhere in any of these three files now. Verified the queue drains
+correctly under real concurrent load. Could not reproduce the exact
+reported repro (Windows, clicking away to File Explorer and back mid-batch,
+a 69-file 5500×3000 batch) in this environment — flagging this honestly
+rather than claiming the repro itself is solved, but this is a confirmed
+real bug matching the project's own established root-cause pattern, not a
+guess.
 
-**Not done yet, sizable and flagged rather than rushed:** the Prompt-to-
-Prompt "Image to Prompt" mode (upload example images, generate prompts
-from them) with its own drag-and-drop zone, thumbnail grid, Text/Image
-mode toggle, word counters, Clear All, and the 35/65 layout change — this
-is a substantial new feature and layout rework, not a small addition, and
-deserves a dedicated pass rather than being squeezed in at the end of an
-already-large round.
+**Card system & workflow — the requested refactor:**
+- **Pagination removed entirely.** No pages, no Previous/Next, no page
+  numbers. One continuously scrolling grid.
+- **Manual column selector removed.** Both view modes now auto-fit column
+  count to window width instead: Expanded 2 cols (small window) / 3
+  (large), Compact 3 / 4 — two fixed tiers per mode, not a continuous
+  card-width division, matching the spec exactly.
+- **New card-creation workflow.** A path never gets a card while it's
+  "waiting" or "working" — no empty cards, no placeholder cards, ever.
+  A card is created exactly once, the instant its own metadata generation
+  finishes (done or failed), already fully populated (thumbnail, filename,
+  title, keywords, description, status), with a lightweight fade-in
+  (~180ms color interpolation from background to the card's real color —
+  CTk has no true alpha channel to animate against). Verified this holds
+  even with Working View off, which needed a real fix: the debounced
+  render that used to only fire when Working View was on now also fires
+  whenever a newly-finished path doesn't have a card yet; and `_gen_done`
+  now forces one final render to close a race where the very last
+  completions in a fast/high-concurrency batch could still have a pending
+  debounce timer when the batch itself ended.
+- **Processing Queue stats** — Completed / Remaining / Avg time per image /
+  Est. time remaining / current AI model / retry count, added to the
+  progress bar area while a batch is running. Deliberate scope call: built
+  into the existing progress bar strip rather than as a separate panel
+  competing with the results grid for space — flagged as a design decision,
+  not hidden as if it were the only option.
+- **Compact card layout restructured** to a single vertical stack —
+  Thumbnail → Status Badge → Filename → Metadata — replacing the previous
+  two-column (thumbnail+status on the right, metadata beside it) layout.
+
+**Sidebar:**
+- The expand/collapse toggle is gone. The sidebar is now permanently the
+  icon-over-short-label style that used to be the "collapsed" state —
+  there is no other mode any more.
+- Icons are noticeably bigger. (A single `CTkButton` can't mix two font
+  sizes in one string, so each nav item is now a small compound widget —
+  an icon label stacked over a text label, each with its own font — with
+  manual hover/click/active-highlight handling replacing the button.)
+- Labels unchanged text, +1pt font size, spacing rebalanced around the
+  bigger icons.
+
+**Dashboard:**
+- **Blinking, root-caused:** `CTkLabel.configure()` forces a full internal
+  redraw every call regardless of whether the value actually changed —
+  and the dashboard was calling it on 20+ widgets every 4 seconds
+  unconditionally. That's what read as the whole screen blinking.
+  Added change-detection (only calls `.configure()` when a value genuinely
+  differs) plus a brief color-pulse highlight on real changes, as a
+  proxy for "fade in/out" since `CTkLabel` has no real alpha. Verified
+  with an instrumented test: zero redundant `configure()` calls across
+  repeated refreshes of unchanged data.
+- **Layout reordered** per request: Recent Activity / Productivity
+  Insights / System Status are now one row of 3 equal-width columns (the
+  latter two existed already but were built and never actually shown,
+  hidden behind the Quick Actions grid); the Activity (Last 7 Days) chart
+  moved to its own full-width row below, height dropped 180px → 90px
+  since it no longer needs to match Recent Activity's height.
+- Same blink fix applied to the Recent Activity list and the 7-day chart:
+  both now skip their (expensive, visibly flashy) full rebuild/redraw
+  entirely when the underlying data hasn't actually changed since the
+  last tick.
+
+**Embedder drag-and-drop dead zone:** only the two narrow CSV/File-Location
+rows were ever registered as drop targets. The popup embedder is small
+enough that those two rows cover most of the window, so it's hard to miss
+them; the full-page embedder sits inside the much bigger main window with
+a lot of open space around those same two rows, and dropping anywhere else
+landed on nothing. Registered the whole page as a catch-all drop target
+too — same fix class as the Smart Workflow drag-and-drop bug from an
+earlier session. Verified under a real tkdnd load: dropping a folder or a
+`.csv` anywhere on the page now routes correctly.
+
+**Scroll bug batch (found from live feedback on this same build):**
+- **Scroll buttons barely moving:** root cause was relying on Tk's
+  `yscrollincrement` for click distance, which turned out to be
+  platform/build-dependent — a low or zero default on at least one real
+  build made each click move almost nothing. Rewritten to compute pixel
+  distance directly from an actual rendered card's height (2 card-heights
+  per click) every time, independent of any Tk/platform default.
+- **Scrollbar thumb not showing/draggable:** the floating ▲/▼ buttons'
+  placement (`x=-14`) directly overlapped the built-in scrollbar's track —
+  confirmed by measuring real widget geometry, not guessed. Moved to
+  `x=-38` to clear it with a gap.
+- **No locked position at either end** ("top cards keep moving down, then
+  there's nothing above them, no lock"): the scroll position wasn't being
+  re-clamped against the *current* content size on every click, so it
+  could drift past the actual first/last card while cards were still
+  resizing/relaying-out live during generation — Tk doesn't automatically
+  re-clamp an existing scroll position when the scrollable content's
+  extent changes after the fact. Every click now recomputes the real
+  content bbox and clamps to it fresh, so each click is self-correcting
+  regardless of what happened to the layout since the last one. Also set
+  `yscrollincrement=1` (was left at whatever the Tk build defaulted to) so
+  `yview_moveto` can't quietly snap to a coarser increment than intended.
+  Verified exact locks at both ends even after 30-40 rapid clicks well
+  past either boundary.
+
+Delivered as changed-files-only: `ui/main_window.py`, `ui/widgets.py`,
+`ui/dashboard.py`, `ui/embed_window.py`, `ui/api_dialog.py`,
+`core/constants.py`.
 
 ## v0.6.3 — Recurring freeze root-caused, Working View readability, drag-scroll, and a bug batch
 
