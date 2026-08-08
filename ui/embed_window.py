@@ -455,14 +455,22 @@ class EmbedContent(ctk.CTkFrame):
             kw_raw=(row.get(col_k) or "").strip() if col_k and col_k!="(skip)" else ""
             desc=(row.get(col_d) or "").strip() if col_d and col_d!="(skip)" else ""
             actual=os.path.basename(fp)
-            ok,msg=embed_metadata_one(et,fp,title,kw_raw,desc,rm_prog,rm_copy)
+            ok,msg,final_path=embed_metadata_one(et,fp,title,kw_raw,desc,rm_prog,rm_copy)
             if ok:
-                final_name=actual
+                final_name=os.path.basename(final_path)
                 if replace_fn and title:
-                    new_path=self._rename_to_title(fp,title)
+                    new_path=self._rename_to_title(final_path,title)
                     if new_path: final_name=os.path.basename(new_path)
+                # msg is just the plain post-embed basename unless
+                # _detect_and_fix_extension had to correct a real/extension
+                # format mismatch, in which case it's "name.ext  (note...)"
+                # — surface that note (a file actually got renamed on disk,
+                # never do that silently) even though final_name above may
+                # have moved on again from a title-based rename since.
+                note=f"  ({msg.split('  (',1)[1]}" if "  (" in msg else ""
                 with lock: counts["ok"]+=1; done[0]+=1
-                self._ui_action_queue.put(lambda fn=final_name:(self._log_msg(f"✓  {fn}"),_update_progress_ui()))
+                self._ui_action_queue.put(lambda fn=final_name,n=note:
+                    (self._log_msg(f"✓  {fn}{n}"),_update_progress_ui()))
             else:
                 with lock: counts["errors"]+=1; done[0]+=1
                 self._ui_action_queue.put(lambda fn=actual,e=msg:(self._log_msg(f"✗  {fn} — {e}"),_update_progress_ui()))
