@@ -559,7 +559,7 @@ class CompactEditCard(ctk.CTkFrame):
     get_result() still exists (returning the untouched result dict) so
     the app's save/export code works on this card unchanged even though
     there's nothing here a person could have hand-edited."""
-    THUMB_MIN_EDGE=80
+    THUMB_MIN_EDGE=64
 
     def __init__(self,master,path,result,on_redo,mode="meta",
                  show_desc=True,request_thumb=None,**kw):
@@ -571,39 +571,43 @@ class CompactEditCard(ctk.CTkFrame):
         self._build(on_redo,request_thumb)
 
     def _build(self,on_redo,request_thumb):
-        # v0.7: single vertical stack — Thumbnail, then the Status Badge
-        # directly below it, then Filename, then the metadata snippets.
-        # (Previously the status label sat over on the thumbnail's right
-        # side, grouped in with the metadata column instead of the
-        # thumbnail it's actually reporting on.)
+        # v0.7.1: packed much tighter per feedback that the previous pass
+        # "lost the compact meaning" — every row's padding cut down, the
+        # header+snippet two-row-per-field layout collapsed into one row
+        # each ("Title: xyz…" instead of a "Title" line then a value line
+        # below it), and Filename+Size merged onto a single line. Still
+        # Thumbnail → Status → Filename → Metadata top-to-bottom, just
+        # with the air squeezed out between them.
         self.grid_columnconfigure(0,weight=1)
 
-        self._tlbl=ctk.CTkLabel(self,text="🖼",font=ctk.CTkFont("Segoe UI",22),
+        self._tlbl=ctk.CTkLabel(self,text="🖼",font=ctk.CTkFont("Segoe UI",20),
             fg_color=BG4,text_color=TXT3,width=self.THUMB_MIN_EDGE,
             height=self.THUMB_MIN_EDGE,corner_radius=6)
-        self._tlbl.grid(row=0,column=0,pady=(10,6))
+        self._tlbl.grid(row=0,column=0,pady=(4,2))
         if request_thumb:
             request_thumb(self.path,self._tlbl,min_edge=self.THUMB_MIN_EDGE)
 
-        self._status_lbl=ctk.CTkLabel(self,text="",font=ctk.CTkFont("Segoe UI",9,"bold"),
-            fg_color="transparent",anchor="center")
-        self._status_lbl.grid(row=1,column=0,sticky="ew",pady=(0,4))
+        self._status_lbl=ctk.CTkLabel(self,text="",font=ctk.CTkFont("Segoe UI",8,"bold"),
+            fg_color="transparent",anchor="center",height=14)
+        self._status_lbl.grid(row=1,column=0,sticky="ew",pady=(0,2))
 
         fname=os.path.basename(self.path)
-        self._fname_lbl=ctk.CTkLabel(self,text=(fname[:24]+"…") if len(fname)>24 else fname,
-            font=ctk.CTkFont("Segoe UI",9,"bold"),text_color=TXT2,
-            fg_color="transparent",anchor="center")
-        self._fname_lbl.grid(row=2,column=0,sticky="ew")
         try:
             size_txt=format_filesize(self.path)
         except Exception:
             size_txt=""
-        self._size_lbl=ctk.CTkLabel(self,text=size_txt,font=ctk.CTkFont("Segoe UI",8),
-            text_color=TXT3,fg_color="transparent",anchor="center")
-        self._size_lbl.grid(row=3,column=0,sticky="ew",pady=(0,8))
+        fname_short=(fname[:20]+"…") if len(fname)>20 else fname
+        self._fname_lbl=ctk.CTkLabel(self,
+            text=f"{fname_short}  ·  {size_txt}" if size_txt else fname_short,
+            font=ctk.CTkFont("Segoe UI",8,"bold"),text_color=TXT2,
+            fg_color="transparent",anchor="center",height=14)
+        self._fname_lbl.grid(row=2,column=0,sticky="ew",pady=(0,4))
+        self._size_lbl=self._fname_lbl  # size is folded into the filename line now;
+                                         # kept as an alias so any external code
+                                         # that still references _size_lbl keeps working
 
         meta=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
-        meta.grid(row=4,column=0,sticky="ew",padx=10)
+        meta.grid(row=4,column=0,sticky="ew",padx=8)
         meta.grid_columnconfigure(0,weight=1)
         self._snippet_lbls={}
 
@@ -614,55 +618,50 @@ class CompactEditCard(ctk.CTkFrame):
             self._snippet_row(meta,0,"title","Title",CYAN)
             r=1
             if self.show_desc:
-                self._snippet_row(meta,1,"desc","Description",TXT2)
+                self._snippet_row(meta,1,"desc","Desc",TXT2)
                 r=2
             self._kw_row(meta,r)
             r+=1
-        self._redo_btn=ctk.CTkButton(self,text="⟳  Regenerate",height=26,
-            font=ctk.CTkFont("Segoe UI",10,"bold"),
+        self._redo_btn=ctk.CTkButton(self,text="⟳  Regenerate",height=20,
+            font=ctk.CTkFont("Segoe UI",9,"bold"),
             fg_color=BG4,hover_color=AMB_DIM,text_color=AMB_BTN,
             corner_radius=6,command=on_redo)
-        self._redo_btn.grid(row=5,column=0,sticky="ew",padx=10,pady=(6,10))
+        self._redo_btn.grid(row=5,column=0,sticky="ew",padx=8,pady=(3,5))
 
         self._refresh_snippets()
         self._refresh_status()
 
     def _snippet_row(self,parent,row,key,label,color):
-        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
-        wrap.grid(row=row,column=0,sticky="ew",pady=(0,3))
-        wrap.grid_columnconfigure(0,weight=1)
-        hdr=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
-        hdr.grid(row=0,column=0,sticky="ew")
-        hdr.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(hdr,text=label,font=ctk.CTkFont("Segoe UI",8,"bold"),
-            text_color=TXT3,fg_color="transparent").grid(row=0,column=0,sticky="w")
-        counter=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont("Segoe UI",8),
-            text_color=TXT3,fg_color="transparent")
-        counter.grid(row=0,column=1,sticky="e")
-        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",10),
-            text_color=color,fg_color="transparent",anchor="w",justify="left")
-        snippet.grid(row=1,column=0,sticky="ew")
-        self._snippet_lbls[key]=(snippet,counter)
+        # ONE row per field now (was header row + value row): a small
+        # gray "Label:" tag immediately followed by the snippet itself,
+        # side by side, cut off with an ellipsis by _first_words rather
+        # than wrapping — that's what actually made this "compact" again.
+        # Explicit height=16 on everything here: CTkLabel/CTkFrame default
+        # to height=28 regardless of font size, which is what was quietly
+        # eating most of the "wasted vertical space" — an 8-9pt label was
+        # still claiming a 28px-tall row unless told otherwise.
+        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0,height=16)
+        wrap.grid(row=row,column=0,sticky="ew",pady=(0,1))
+        wrap.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(wrap,text=f"{label}:",font=ctk.CTkFont("Segoe UI",8,"bold"),
+            text_color=TXT3,fg_color="transparent",height=16).grid(row=0,column=0,sticky="w",padx=(0,3))
+        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",9),
+            text_color=color,fg_color="transparent",anchor="w",justify="left",height=16)
+        snippet.grid(row=0,column=1,sticky="ew")
+        self._snippet_lbls[key]=(snippet,None)
 
     def _kw_row(self,parent,row):
-        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0)
-        wrap.grid(row=row,column=0,sticky="ew",pady=(0,3))
-        wrap.grid_columnconfigure(0,weight=1)
-        hdr=ctk.CTkFrame(wrap,fg_color="transparent",corner_radius=0)
-        hdr.grid(row=0,column=0,sticky="ew")
-        hdr.grid_columnconfigure(0,weight=1)
-        ctk.CTkLabel(hdr,text="Keywords",font=ctk.CTkFont("Segoe UI",8,"bold"),
-            text_color=TXT3,fg_color="transparent").grid(row=0,column=0,sticky="w")
-        counter=ctk.CTkLabel(hdr,text="",font=ctk.CTkFont("Segoe UI",8),
-            text_color=TXT3,fg_color="transparent")
-        counter.grid(row=0,column=1,sticky="e")
-        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",10),
-            text_color=GRN,fg_color="transparent",anchor="w",justify="left",
-            wraplength=260)
-        snippet.grid(row=1,column=0,sticky="ew")
-        self._snippet_lbls["kw"]=(snippet,counter)
+        wrap=ctk.CTkFrame(parent,fg_color="transparent",corner_radius=0,height=16)
+        wrap.grid(row=row,column=0,sticky="ew",pady=(0,1))
+        wrap.grid_columnconfigure(1,weight=1)
+        ctk.CTkLabel(wrap,text="Kw:",font=ctk.CTkFont("Segoe UI",8,"bold"),
+            text_color=TXT3,fg_color="transparent",height=16).grid(row=0,column=0,sticky="w",padx=(0,3))
+        snippet=ctk.CTkLabel(wrap,text="",font=ctk.CTkFont("Segoe UI",9),
+            text_color=GRN,fg_color="transparent",anchor="w",justify="left",height=16)
+        snippet.grid(row=0,column=1,sticky="ew")
+        self._snippet_lbls["kw"]=(snippet,None)
 
-    def _first_words(self,text,n=8):
+    def _first_words(self,text,n=6):
         words=text.split()
         snippet=" ".join(words[:n])
         return snippet+("…" if len(words)>n else "")
@@ -672,10 +671,11 @@ class CompactEditCard(ctk.CTkFrame):
             text=self.result.get(key,"") or ""
             if key=="kw":
                 kw_list=[k.strip() for k in text.split(",") if k.strip()]
-                snippet_lbl.configure(text=", ".join(kw_list[:10]) or "—")
-                counter_lbl.configure(text=f"{len(kw_list)} total")
+                snippet_lbl.configure(text=(", ".join(kw_list[:6]) or "—")+
+                    (f"  (+{len(kw_list)-6})" if len(kw_list)>6 else ""))
             else:
                 snippet_lbl.configure(text=self._first_words(text) or "—")
+            if counter_lbl is not None:
                 counter_lbl.configure(text=f"{len(text)} ch")
 
     def _refresh_status(self):
@@ -702,11 +702,12 @@ class CompactEditCard(ctk.CTkFrame):
     def rebind(self,path,result,on_redo):
         self.path=path
         fname=os.path.basename(path)
-        self._fname_lbl.configure(text=(fname[:20]+"…") if len(fname)>20 else fname)
+        fname_short=(fname[:20]+"…") if len(fname)>20 else fname
         try:
-            self._size_lbl.configure(text=format_filesize(path))
+            size_txt=format_filesize(path)
         except Exception:
-            self._size_lbl.configure(text="")
+            size_txt=""
+        self._fname_lbl.configure(text=f"{fname_short}  ·  {size_txt}" if size_txt else fname_short)
         try:
             self._tlbl.configure(image=None,text="🖼")
             self._tlbl._image=None
