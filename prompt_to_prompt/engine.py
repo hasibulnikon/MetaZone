@@ -12,7 +12,7 @@ so a single oversized request doesn't risk truncation/low quality.
 import re, threading, time
 
 from engine.ai_providers import call_with_failover
-from engine.prompt_generator import build_prompt_to_prompt_prompt
+from engine.prompt_generator import build_prompt_to_prompt_prompt, build_image_to_prompts_prompt
 from core import stats_db
 
 BATCH_SIZE = 10
@@ -97,17 +97,21 @@ class PromptToPromptEngine:
         self.paused = not self.paused
         return self.paused
 
-    def start(self, original_prompt, count, creativity, style):
+    def start(self, original_prompt, count, creativity, style, source_image=None):
+        """source_image=None -> the original text-to-prompts mode.
+        source_image=<path> -> Image to Prompt mode: original_prompt is
+        ignored, the reference image is sent through the vision-capable
+        call path instead (see _run_batches)."""
         self.stop_flag = False
         self.paused = False
         self.results = []
         self.errors = []
         self.running = True
-        threading.Thread(target=self._run, args=(original_prompt, count, creativity, style),
+        threading.Thread(target=self._run, args=(original_prompt, count, creativity, style, source_image),
                           daemon=True).start()
 
     def _run_batches(self, original_prompt, sizes, creativity, style, collected, lock,
-                      progress_base, progress_total):
+                      progress_base, progress_total, source_image=None):
         """Runs one wave of batches concurrently and returns once all of
         them are done. Each batch is given whatever's in `collected` at
         the moment IT starts (not a fixed snapshot from before the wave),
@@ -121,11 +125,16 @@ class PromptToPromptEngine:
                 return
             with lock:
                 avoid_snapshot = list(collected[-20:])
-            prompt = build_prompt_to_prompt_prompt(
-                original_prompt, batch_n, creativity, style, avoid=avoid_snapshot)
+            if source_image:
+                prompt = build_image_to_prompts_prompt(batch_n, creativity, style, avoid=avoid_snapshot)
+                call_path = source_image
+            else:
+                prompt = build_prompt_to_prompt_prompt(
+                    original_prompt, batch_n, creativity, style, avoid=avoid_snapshot)
+                call_path = None
             try:
                 raw, provider, model_id, key_idx = call_with_failover(
-                    None, prompt, self.app.prefs, max_tokens=4000)
+                    call_path, prompt, self.app.prefs, max_tokens=4000)
                 self.app._last_ai_provider, self.app._last_ai_model = provider, model_id
                 parsed = _clean_prompts(_parse_prompts(raw, batch_n))
                 with lock:
@@ -146,7 +155,7 @@ class PromptToPromptEngine:
         ev.wait()
         return done_counter[0]
 
-    def _run(self, original_prompt, count, creativity, style):
+    def _run(self, original_prompt, count, creativity, style, source_image=None):
         start_time = time.time()
         lock = threading.Lock()
         collected = []
@@ -161,7 +170,7 @@ class PromptToPromptEngine:
         batches = make_batches(count)
         total_batches_est = len(batches)  # for the progress label; may grow below
         self._run_batches(original_prompt, batches, creativity, style, collected, lock,
-                           0, total_batches_est)
+                           0, total_batches_est, source_image=source_image)
 
         # Concurrent batches inevitably start before earlier ones have
         # populated the avoid-list, so near-duplicate variations get
@@ -179,7 +188,7 @@ class PromptToPromptEngine:
             total_batches_est += len(topup_batches)
             done_so_far = len(batches) + sum(1 for _ in range(extra_rounds))  # rough, label-only
             self._run_batches(original_prompt, topup_batches, creativity, style, collected, lock,
-                               done_so_far, total_batches_est)
+                               done_so_far, total_batches_est, source_image=source_image)
             self.results = dedupe(collected)
             extra_rounds += 1
 
@@ -188,7 +197,8 @@ class PromptToPromptEngine:
         if self.results:
             stats_db.record("prompt_to_prompt", "completed", count=len(self.results),
                              api_requests=total_batches_est, seconds=seconds,
-                             detail=f"Prompts: {len(self.results)}")
+                             detail=f"Prompts: {len(self.results)}"
+                             + (" (from image)" if source_image else ""))
         if self.errors and not self.results:
             if self.on_error:
                 self.on_error(f"All batches failed. Last error: {self.errors[-1]}")
