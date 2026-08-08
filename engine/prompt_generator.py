@@ -172,6 +172,65 @@ def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avo
     )
 
 
+def build_image_to_prompts_prompt(count, creativity, style, avoid=None):
+    """Prompt-to-Prompt's 'Image to Prompt' mode: takes ONE reference
+    image (sent through call_with_failover WITH a path this time, unlike
+    the text mode, so the vision-capable call path is used) and asks for
+    `count` different prompts inspired by/describing it — same
+    creativity/style controls and avoid-list dedup machinery as the
+    text-to-prompts mode, just anchored on an image instead of an
+    existing prompt string."""
+    creativity_note = {
+        "Low": "Stay close and literal to what's actually in the image — "
+               "small wording changes, synonym swaps, minor detail shifts "
+               "between the prompts. Same core subject and composition.",
+        "Medium": "Meaningful variety — vary the angle, mood, setting details, "
+                  "or framing you'd imagine around this image's subject, while "
+                  "staying recognizably inspired by it.",
+        "High": "Bold, imaginative variations — use the image as a jumping-off "
+                "point rather than a literal description: different angles, "
+                "settings, or interpretations of the same underlying subject "
+                "or style. Still usable for the same commercial purpose.",
+    }.get(creativity, "Meaningful variety — vary the details while staying inspired by the image.")
+
+    style_note = {
+        "Maintain Original": "Match the image's own apparent tone and level of detail.",
+        "Commercial": "Polished, commercially safe, broadly marketable — the kind of prompt "
+                      "a stock content buyer would want. Avoid anything edgy or niche-limiting.",
+        "Creative": "More artistic and evocative language — mood, atmosphere, and visual "
+                    "flair, while staying usable.",
+        "Minimal": "Short, concise prompts — the essential subject and setting only, no "
+                   "excess description.",
+        "Highly Detailed": "Long, richly detailed prompts covering subject, setting, lighting, "
+                           "color palette, composition, and mood.",
+    }.get(style, "Match the image's own apparent tone and detail level.")
+
+    avoid_note = ""
+    if avoid:
+        sample = "; ".join(avoid[:8])
+        avoid_note = (f"\n- These prompts already exist — do NOT repeat them or produce "
+                       f"near-duplicates of: {sample}")
+
+    return (
+        f"You are an expert AI image-generation prompt writer working from a "
+        f"reference image, creating new prompts inspired by it for a stock-content creator.\n\n"
+        f"Look at the attached image and generate EXACTLY {count} new, DIFFERENT prompts "
+        f"inspired by it.\n\n"
+        f"Creativity level ({creativity}): {creativity_note}\n"
+        f"Style ({style}): {style_note}\n\n"
+        f"Rules:\n"
+        f"- Every prompt must remain commercially useful stock content.\n"
+        f"- Keep the same general niche/subject category as the image.\n"
+        f"- No two prompts may be duplicates or near-duplicates of each other.\n"
+        f"- No repeated sentence structures — vary how each prompt opens and is phrased.\n"
+        f"- No trademarked names, brand names, or copyrighted character names.\n"
+        f"- Each prompt must read as a complete, well-formed, polished prompt on its own."
+        f"{avoid_note}\n\n"
+        f"Output format: EXACTLY {count} lines, one prompt per line, nothing else — "
+        f"no numbering, no bullets, no blank lines, no preamble, no markdown."
+    )
+
+
 def build_prompt_prompt(max_words, styles, custom_prompt=""):
     style_str = ", ".join(styles) if styles else "realistic photography"
     extra = f"\n- MANDATORY: {custom_prompt.strip()}" if custom_prompt.strip() else ""
