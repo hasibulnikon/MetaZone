@@ -10,12 +10,16 @@ import customtkinter as ctk
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_DIM,AMB_BTN,AMB_DIM,CYAN,ABSOLUTE_BG)
 from core import stats_db
+from engine.ai_providers import get_active_keys
 
 try:
     import psutil
     _HAS_PSUTIL = True
-except Exception:
+    _PSUTIL_IMPORT_ERROR = None
+except Exception as _e:
     _HAS_PSUTIL = False
+    _PSUTIL_IMPORT_ERROR = str(_e)
+    psutil = None
 
 CHART_COLORS = {
     "files_processed": "#3b82f6",
@@ -65,12 +69,16 @@ def _stat_card(parent, icon, value, label, sub, color, corner=False):
 
 
 def _kv_row(parent, label, value, row, value_color=None):
+    # height=20 explicit: CTkLabel silently defaults to height=28
+    # regardless of font size (same thing that made the compact cards
+    # waste vertical space) -- every kv_row in every dashboard panel was
+    # quietly a third taller than its 12pt text actually needed.
     ctk.CTkLabel(parent, text=label, font=ctk.CTkFont("Segoe UI", 12),
-        text_color=TXT3, fg_color="transparent", anchor="w"
-    ).grid(row=row + 1, column=0, sticky="w", padx=14, pady=4)
+        text_color=TXT3, fg_color="transparent", anchor="w", height=20
+    ).grid(row=row + 1, column=0, sticky="w", padx=14, pady=3)
     lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont("Segoe UI", 12, "bold"),
-        text_color=value_color or TXT, fg_color="transparent", anchor="e")
-    lbl.grid(row=row + 1, column=1, sticky="e", padx=14, pady=4)
+        text_color=value_color or TXT, fg_color="transparent", anchor="e", height=20)
+    lbl.grid(row=row + 1, column=1, sticky="e", padx=14, pady=3)
     return lbl
 
 
@@ -90,6 +98,18 @@ class DashboardPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=BG1, corner_radius=0)
         self.app = app
+        if _HAS_PSUTIL:
+            # Prime psutil's internal CPU-delta baseline right away.
+            # psutil.cpu_percent()'s FIRST call ever in a process always
+            # returns a meaningless 0.0 (there's no previous sample yet to
+            # diff against) — every call after that returns a real delta.
+            # Without this warm-up call, the very first real reading a
+            # person sees on opening the dashboard is that meaningless
+            # 0.0%, which reads exactly like "this isn't tracking
+            # anything" even though the next refresh 4s later would have
+            # been correct.
+            try: psutil.cpu_percent(interval=0)
+            except Exception: pass
         self._build()
         self.after(1500, self._auto_refresh)
 
@@ -152,11 +172,34 @@ class DashboardPage(ctk.CTkFrame):
         self._ai_box = _section(row2, "AI Usage", "🤖")
         self._ai_box.grid(row=0, column=1, sticky="nsew", padx=6)
         self._ai_rows = {}
+        # "Est. Cost" replaced with a daily-capacity estimate: this app is
+        # free-providers-only, so a dollar figure here was never the
+        # right number to show anyone. "Capacity Left Today" instead
+        # estimates how many more images the CURRENTLY stored active keys
+        # could process before hitting their daily request limit —
+        # active_keys × daily_limit_per_key, minus requests already made
+        # today. daily_limit_per_key is a per-key editable setting (see
+        # the small ✎ next to the row below), not a hardcoded number:
+        # free-tier daily limits vary by provider AND by model within a
+        # provider, and change over time at the provider's discretion, so
+        # guessing a single number and presenting it as fact would
+        # eventually just be quietly wrong for someone.
         ai_items = [("provider", "Current Provider"), ("model", "Current Model"),
                     ("requests", "API Requests"), ("requests_saved", "API Requests Saved"),
-                    ("cost", "Est. Cost"), ("cost_saved", "Est. Cost Saved")]
+                    ("capacity", "Est. Capacity Left Today"), ("used_today", "Used Today")]
         for i, (key, label) in enumerate(ai_items):
             self._ai_rows[key] = _kv_row(self._ai_box, label, "—", i)
+        edit_row = ctk.CTkFrame(self._ai_box, fg_color="transparent")
+        edit_row.grid(row=len(ai_items) + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 8))
+        ctk.CTkLabel(edit_row, text="Daily limit per key (adjust to match your provider):",
+            font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color="transparent"
+            ).pack(side="left")
+        self._daily_limit_entry = ctk.CTkEntry(edit_row, width=48, height=20,
+            font=ctk.CTkFont("Segoe UI", 9), fg_color=BG3, border_width=0, corner_radius=4)
+        self._daily_limit_entry.insert(0, str(getattr(self.app, "prefs", {}).get("ai_daily_limit_per_key", 250)))
+        self._daily_limit_entry.pack(side="right")
+        self._daily_limit_entry.bind("<FocusOut>", self._on_daily_limit_changed)
+        self._daily_limit_entry.bind("<Return>", self._on_daily_limit_changed)
 
         # Quick Actions sits in columns 2-3 of row2, as before.
         qa_box = ctk.CTkFrame(row2, fg_color="transparent", corner_radius=0)
@@ -203,8 +246,8 @@ class DashboardPage(ctk.CTkFrame):
         self._sys_box.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
         self._sys_rows = {}
         sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
-                     ("queue", "Queue Status"), ("cpu", "CPU Usage"), ("ram", "RAM Usage"),
-                     ("smart", "Smart Workflow")]
+                     ("queue", "Queue Status"), ("smart", "Smart Workflow"),
+                     ("cpu", "CPU Usage"), ("ram", "RAM Usage")]
         for i, (key, label) in enumerate(sys_items):
             self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
 
@@ -325,6 +368,7 @@ class DashboardPage(ctk.CTkFrame):
 
     def _refresh_ai_usage(self):
         lt = stats_db.lifetime_summary()
+        today = stats_db.today_summary()
         provider = getattr(self.app, "_last_ai_provider", None) or "—"
         model = getattr(self.app, "_last_ai_model", None) or "—"
         self._apply(self._ai_rows["provider"], provider)
@@ -332,8 +376,42 @@ class DashboardPage(ctk.CTkFrame):
         self._apply(self._ai_rows["requests"], f"{lt['total_api_requests']:,}")
         self._apply(self._ai_rows["requests_saved"], f"{lt['total_api_requests_saved']:,}",
             color=GRN if lt["total_api_requests_saved"] else TXT)
-        self._apply(self._ai_rows["cost"], f"${lt['est_api_cost']:.2f}")
-        self._apply(self._ai_rows["cost_saved"], f"${lt['est_api_cost_saved']:.2f}", color=GRN)
+
+        try:
+            active_keys = len(get_active_keys(self.app.prefs))
+        except Exception:
+            active_keys = 0
+        try:
+            limit_per_key = int(self.app.prefs.get("ai_daily_limit_per_key", 250))
+        except Exception:
+            limit_per_key = 250
+        used_today = today.get("api_requests", 0)
+        total_capacity = active_keys * limit_per_key
+        remaining = max(total_capacity - used_today, 0)
+        if active_keys == 0:
+            cap_text = "No active keys"
+            cap_color = TXT3
+        else:
+            cap_text = f"~{remaining:,} images"
+            cap_color = GRN if remaining > 0 else RED_BTN
+        self._apply(self._ai_rows["capacity"], cap_text, color=cap_color)
+        self._apply(self._ai_rows["used_today"],
+            f"{used_today:,} / {total_capacity:,}" if active_keys else f"{used_today:,}")
+
+    def _on_daily_limit_changed(self, event=None):
+        try:
+            val = max(1, int(self._daily_limit_entry.get().strip() or 250))
+        except Exception:
+            val = 250
+        self._daily_limit_entry.delete(0, "end")
+        self._daily_limit_entry.insert(0, str(val))
+        self.app.prefs["ai_daily_limit_per_key"] = val
+        try:
+            from core.config import save_prefs
+            save_prefs(self.app.prefs)
+        except Exception:
+            pass
+        self._refresh_ai_usage()
 
     def _refresh_insights(self):
         lt = stats_db.lifetime_summary()
@@ -369,15 +447,25 @@ class DashboardPage(ctk.CTkFrame):
             try:
                 self._apply(self._sys_rows["cpu"], f"{psutil.cpu_percent(interval=0):.0f}%")
                 self._apply(self._sys_rows["ram"], f"{psutil.virtual_memory().percent:.0f}%")
-            except Exception:
-                self._apply(self._sys_rows["cpu"], "—"); self._apply(self._sys_rows["ram"], "—")
+            except Exception as e:
+                # Distinct from "psutil isn't installed at all" (N/A,
+                # below) — this means the import succeeded but an actual
+                # call failed at runtime, which is worth telling apart if
+                # this is ever reported again.
+                self._psutil_runtime_error = str(e)
+                self._apply(self._sys_rows["cpu"], "err"); self._apply(self._sys_rows["ram"], "err")
         else:
-            self._apply(self._sys_rows["cpu"], "—"); self._apply(self._sys_rows["ram"], "—")
+            self._apply(self._sys_rows["cpu"], "N/A"); self._apply(self._sys_rows["ram"], "N/A")
         self._apply(self._sys_rows["smart"], "Running" if sw_running else "Idle",
             color=AMB_BTN if sw_running else TXT3)
 
     def _refresh_activity(self):
-        rows = stats_db.recent_activity(6)
+        # 4, not 6 -- and each row is now one line, not two (see below).
+        # Both changes are about the same thing: this panel's natural
+        # height was dictating the whole row's height (Tk grid stretches
+        # every cell in a row to the tallest one), leaving Productivity
+        # Insights and System Status padded with dead space to match it.
+        rows = stats_db.recent_activity(4)
         # Recent Activity rebuilt its whole widget tree (destroy + recreate
         # every row) on EVERY 4s tick regardless of whether anything had
         # actually happened — that full teardown/rebuild is a much bigger
@@ -398,22 +486,19 @@ class DashboardPage(ctk.CTkFrame):
                    "prompt_generation": "Prompt generation", "prompt_to_prompt": "Prompt-to-Prompt",
                    "smart_workflow_run": "Smart Workflow"}
         for ts, kind, status, count, detail in rows:
-            row = ctk.CTkFrame(self._activity_list, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=3)
+            row = ctk.CTkFrame(self._activity_list, fg_color="transparent", height=22)
+            row.pack(fill="x", padx=10, pady=2)
             icon = "✓" if status == "completed" else "✕"
             color = GRN if status == "completed" else RED_BTN
             ctk.CTkLabel(row, text=icon, text_color=color, fg_color="transparent",
-                font=ctk.CTkFont("Segoe UI", 12, "bold"), width=16).pack(side="left")
-            txt = ctk.CTkFrame(row, fg_color="transparent")
-            txt.pack(side="left", fill="x", expand=True, padx=(4, 0))
+                font=ctk.CTkFont("Segoe UI", 11, "bold"), width=16, height=18).pack(side="left")
             title = f"{labels.get(kind, kind)} {'completed' if status=='completed' else 'failed'}"
-            ctk.CTkLabel(txt, text=title, font=ctk.CTkFont("Segoe UI", 11, "bold"),
-                text_color=TXT2, fg_color="transparent", anchor="w").pack(anchor="w")
             sub = detail or f"Count: {count}"
-            ctk.CTkLabel(txt, text=sub, font=ctk.CTkFont("Segoe UI", 10),
-                text_color=TXT3, fg_color="transparent", anchor="w").pack(anchor="w")
-            ctk.CTkLabel(row, text=self._relative_time(ts), font=ctk.CTkFont("Segoe UI", 10),
-                text_color=TXT3, fg_color="transparent").pack(side="right")
+            ctk.CTkLabel(row, text=f"{title}  ·  {sub}", font=ctk.CTkFont("Segoe UI", 10, "bold"),
+                text_color=TXT2, fg_color="transparent", anchor="w", height=18).pack(
+                side="left", fill="x", expand=True, padx=(4, 0))
+            ctk.CTkLabel(row, text=self._relative_time(ts), font=ctk.CTkFont("Segoe UI", 9),
+                text_color=TXT3, fg_color="transparent", height=18).pack(side="right")
 
     def _relative_time(self, ts):
         import datetime
