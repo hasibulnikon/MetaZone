@@ -19,7 +19,7 @@ from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
 from engine.prompt_generator import build_meta_prompt, build_prompt_prompt
 from engine.parser import parse_meta, enforce_single_keywords, _strip_copyright_keywords, smart_trim, dedupe_content_phrase, sanitize_text_punctuation, sanitize_keywords_punctuation
-from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
+from ui.theme import (BG1,BG2,BG3,BG4,NAV_BG,GLASS,GLASS_BDR,GLASS_BDR_AC,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_BTN_H,AMB_DIM,
     CYAN,ABSOLUTE_BG,VIRT_BUFFER)
 from ui.dnd import DnDCTk, DND_AVAILABLE, DND_FILES
@@ -95,7 +95,6 @@ class App(DnDCTk):
         # more — every loaded image renders in one continuously
         # scrolling grid (see _render_page).
         self.view_mode_var=StringVar(value=self.prefs.get("view_mode","expanded"))
-        self.working_view_var=BooleanVar(value=self.prefs.get("working_view",False))
 
         # AI settings
         self.ai_title_var    =StringVar(value=str(self.prefs.get("title_len",130)))
@@ -133,14 +132,31 @@ class App(DnDCTk):
                 else:
                     img=make_thumb(path,size)
                 if img is not None:
-                    self._thumb_queue.put((widget,img))
+                    self._thumb_queue.put((widget,img,path))
         for _ in range(n):
             threading.Thread(target=worker,daemon=True).start()
 
     def _request_thumb(self,path,widget,size=(58,58),min_edge=None):
         """Queue a thumbnail decode job for the bounded worker pool instead
         of spawning a fresh OS thread per image — this is what previously
-        caused thread-storm freezes/races when importing many images."""
+        caused thread-storm freezes/races when importing many images.
+
+        Tags the widget with the path it currently wants (_thumb_want_path)
+        so a stale delivery can be told apart from a current one — see
+        _poll_thumb_queue. This matters because pool-slot cards get
+        rebind()ed to a different path constantly as results come in out
+        of import order, and with only 4 workers pulling a shared queue,
+        an OLDER job for a path this exact widget no longer represents can
+        easily still be mid-decode (worse the larger the images) when a
+        NEWER request for the widget's new path goes out — nothing
+        previously stopped that stale result from landing after the
+        correct one and silently overwriting it with the wrong image, or
+        landing as the only delivery at all if the correct one was itself
+        superseded again before it got picked up. Without this tag, more
+        churn (bigger batches, more concurrency, bigger/slower-to-decode
+        images) directly means more chances for the wrong or missing
+        thumbnail to be whatever's left on screen."""
+        widget._thumb_want_path=path
         self._thumb_job_queue.put((path,size,widget,min_edge))
 
     def _center(self,w,h):
@@ -203,9 +219,13 @@ class App(DnDCTk):
         done=0
         try:
             while done<15:
-                (w,img)=self._thumb_queue.get_nowait()
+                (w,img,path)=self._thumb_queue.get_nowait()
                 try:
-                    if w.winfo_exists(): w.configure(image=img,text=""); w._image=img
+                    # Discard stale deliveries: only apply if this widget
+                    # still actually wants THIS path's thumbnail right now
+                    # (see _request_thumb's docstring for why this matters).
+                    if w.winfo_exists() and getattr(w,"_thumb_want_path",None)==path:
+                        w.configure(image=img,text=""); w._image=img
                 except: pass
                 done+=1
         except queue.Empty: pass
@@ -266,8 +286,21 @@ class App(DnDCTk):
         # is now a small compound widget — an icon label over a name
         # label — instead of a single-font button) and labels are
         # unchanged text at +1pt.
-        NAV_W=76
-        nav=ctk.CTkFrame(shell,fg_color=BG2,corner_radius=0,width=NAV_W)
+        NAV_W=100  # was 76 -- +30% per request, so bigger icons/labels
+                   # (see _make_nav_item) actually have room to breathe
+        # border_width/border_color: a real separator line, not just a
+        # color difference. This project's own Meta Generator/Smart
+        # Workflow settings sidebar (_sb_frame) uses BG2, and a previous
+        # nav rewrite had accidentally reverted nav to plain BG2 too, so
+        # on any page besides the Dashboard the two sat flush against
+        # each other in the exact same color and read as one panel.
+        # NAV_BG (theme-aware — darkens the base color, or lightens it if
+        # the base is already very dark/light, so it's never the same
+        # tone as whatever's next to it either way) fixes the color; the
+        # border means the separation holds even if some future panel
+        # happens to pick the same tone by coincidence.
+        nav=ctk.CTkFrame(shell,fg_color=NAV_BG,corner_radius=0,width=NAV_W,
+            border_width=1,border_color=GLASS_BDR)
         nav.grid(row=0,column=0,sticky="nsew"); nav.grid_propagate(False)
         self._nav_w=NAV_W
 
@@ -929,7 +962,6 @@ class App(DnDCTk):
             "include_desc":self.ai_include_desc_var.get(),
             "content_type":self.ai_content_type_var.get(),
             "view_mode":self.view_mode_var.get(),
-            "working_view":self.working_view_var.get(),
         })
         save_prefs(self.prefs)
 
@@ -1108,21 +1140,11 @@ class App(DnDCTk):
             command=lambda:self._set_view_mode("compact"))
         self._view_compact_btn.pack(side="left",padx=(0,10))
 
-        # Working View — while generating, show only the cards currently
-        # being processed (advances live as each finishes), instead of
-        # whatever static page you happen to be on. Applies to both
-        # Expanded and Compact.
-        wv=ctk.CTkFrame(vs,fg_color="transparent",corner_radius=0)
-        wv.pack(side="left",padx=(10,0))
-        ctk.CTkLabel(wv,text="Working View",font=ctk.CTkFont("Segoe UI",10),
-            text_color=TXT2,fg_color="transparent").pack(side="left",padx=(0,4))
-        ctk.CTkSwitch(wv,text="",variable=self.working_view_var,progress_color=GRN,
-            button_color=TXT,fg_color=GLASS_BDR,width=34,height=18,
-            command=self._on_working_view_toggle).pack(side="left")
-
-        # Total-count indicator — replaces the old Page 1/1 label now that
-        # there's no pagination; shows "N images" normally, or the
-        # Working View in-flight/just-finished counts while generating.
+        # Total-count indicator — shows "N images" normally, or the live
+        # Completed/Remaining while generating (Working View, which used
+        # to live in this spot as a toggle, is gone — the results grid
+        # just auto-scrolls to the newest card as it arrives instead;
+        # see _render_page / _scroll_to_bottom).
         self._page_lbl=ctk.CTkLabel(vs,text="0 images",
             font=ctk.CTkFont("Segoe UI",10),text_color=TXT2,fg_color="transparent")
         self._page_lbl.pack(side="left",padx=(10,0))
@@ -1438,60 +1460,99 @@ class App(DnDCTk):
             self._render_page()
 
     def _auto_grid_cols(self):
-        """Both view modes auto-fit their column count to the available
-        width now — no manual column picker. Expanded goes 2 cols in a
-        small window / 3 in a large one; Compact (narrower cards) goes
-        3 small / 4 large. Two fixed tiers per mode, not a continuous
-        card-width division, per spec."""
+        """Compact still auto-fits by width (3 cols in a smaller window, 4
+        in a larger one — there's no crisp "maximized" concept that
+        matters for a narrow card). Expanded is different by request: 2
+        columns unless the window is ACTUALLY maximized ("full window
+        mode"), in which case 3 — a real maximize/restore state check,
+        not a width guess, since a wide-but-not-maximized window should
+        still only get 2."""
         try:
             w=self._gen_scroll.winfo_width() or 1
         except Exception:
             w=1
         if self.view_mode_var.get()=="compact":
             return 4 if w>=900 else 3
-        return 3 if w>=1100 else 2
+        try:
+            maximized=self.state()=="zoomed"
+        except Exception:
+            maximized=False
+        return 3 if maximized else 2
 
     def _bind_drag_scroll(self,card):
         """Attaches the same drag-to-scroll gesture (see its setup in
-        _build_content) directly onto a card widget and its thumbnail —
-        cards fill nearly the whole canvas, so without this there's
-        barely any exposed background left to grab. Interactive
-        sub-widgets (textboxes, Regenerate) are deliberately left alone;
-        clicking/editing those still works exactly as before, and a
-        small movement threshold in the shared handler means a plain
-        click never mis-fires as a scroll."""
+        _build_content) onto every non-interactive widget in the card,
+        recursively — not just the card's own background and the
+        thumbnail. Per feedback, clicking anywhere that isn't an actual
+        control should be able to start a drag-scroll, not just those two
+        spots. CTkTextbox (the editable title/description fields),
+        CTkEntry, and CTkButton (Regenerate, Expand/Collapse, copy/paste
+        icons) are skipped so typing and clicking those still works
+        exactly as before — everything else (labels, the status badge,
+        filename, snippet text, the plain background frames wrapping
+        them) becomes a drag handle. A card is only ever bound once, right
+        after it's built — rebinding an existing pooled card to a new
+        path doesn't rebuild its widget tree, so nothing needs re-binding
+        then."""
         if not hasattr(self,"_drag_scroll_handlers"):
             return
         start,motion,end=self._drag_scroll_handlers
-        for w in (card, getattr(card,"_tlbl",None)):
-            if w is None:
-                continue
+        skip_types=(ctk.CTkTextbox,ctk.CTkEntry,ctk.CTkButton,
+                    tkinter.Text,tkinter.Entry)
+        def _bind_recursive(w):
+            if isinstance(w,skip_types):
+                return
             try:
                 w.bind("<ButtonPress-1>",start,add="+")
                 w.bind("<B1-Motion>",motion,add="+")
                 w.bind("<ButtonRelease-1>",end,add="+")
             except Exception:
                 pass
+            try:
+                children=w.winfo_children()
+            except Exception:
+                children=[]
+            for c in children:
+                _bind_recursive(c)
+        _bind_recursive(card)
 
     def _fade_in_card(self,card):
-        """Lightweight fade-in for a freshly created card widget (only
-        ever called the first time a pool slot is built — reused/rebound
-        cards never re-fade). CTk/Tk has no real alpha channel to
-        animate, so this interpolates the card's own background/border
-        color from the page background toward its real GLASS color over
-        ~180ms — the card visibly materializes without the cost of a
-        true transparency+slide animation. Duration and step count are
-        deliberately small; performance matters more than the effect."""
-        end_fg,end_bdr=GLASS,GLASS_BDR
-        steps=6
+        """Fade-in for a freshly created card widget (only ever called the
+        first time a pool slot is built — reused/rebound cards never
+        re-fade). Rewritten per feedback that the first version was "very
+        short and barely noticeable": that version only interpolated the
+        card frame's own fg_color/border_color from BG1 to GLASS, but
+        those two colors are only 10 RGB points apart to begin with (by
+        design — GLASS is meant to read as a subtle step up from the
+        background, not a bright card) — animating between two colors
+        that close together is essentially invisible regardless of
+        duration or step count, and the card's own frame is also mostly
+        hidden behind its own child widgets (thumbnail, text) which
+        weren't fading at all, so most of the card's visible area
+        appeared instantly anyway.
+        This version: (1) longer and smoother — 16 steps at 20ms = 320ms
+        total, up from 6 steps at 30ms = 180ms; (2) the border does a
+        genuine two-phase flash-then-settle through the accent color
+        (BG1 → accent → resting GLASS_BDR) instead of a flat tiny-delta
+        lerp, since the accent color has real contrast against the
+        background to actually be seen and read as motion, not just a
+        recolor."""
+        end_fg=GLASS
+        steps=16
         def _step(i):
             try:
                 if not card.winfo_exists(): return
                 t=i/steps
-                card.configure(fg_color=_lerp_hex(BG1,end_fg,t),
-                                border_color=_lerp_hex(BG1,end_bdr,t))
+                fg=_lerp_hex(BG1,end_fg,t)
+                if t<0.55:
+                    bdr=_lerp_hex(BG1,GLASS_BDR_AC,t/0.55)
+                else:
+                    bdr=_lerp_hex(GLASS_BDR_AC,GLASS_BDR,(t-0.55)/0.45)
+                card.configure(fg_color=fg,border_color=bdr,border_width=1)
                 if i<steps:
-                    card.after(30,lambda:_step(i+1))
+                    card.after(20,lambda:_step(i+1))
+                else:
+                    card.configure(border_width=1,border_color=GLASS_BDR)
             except Exception:
                 pass
         _step(0)
@@ -1531,49 +1592,32 @@ class App(DnDCTk):
         self._gen_empty_lbl.place_forget()
 
         cols=self._auto_grid_cols()
+        # Column count changing (window resized, or Expanded just crossed
+        # the maximize threshold) means every already-visible card is
+        # about to jump to a new row/column position, and each one's
+        # available width just changed too — which can make its own text
+        # rewrap at the same instant. Per feedback that this "deformation
+        # and reformation" during a reflow looks bad, cards that were
+        # already on screen get a quick dim-then-restore flash timed
+        # around the regrid instead of just snapping, so the layout jump
+        # reads as one soft transition rather than an abrupt jolt. Only
+        # applies when cols actually changed — a normal render (new card
+        # arriving, status update) never triggers it.
+        cols_changed=(cols!=getattr(self,"_last_auto_cols",None)
+                      and getattr(self,"_last_auto_cols",None) is not None)
         self._last_auto_cols=cols
-        working_view=self.working_view_var.get()
 
         # No pagination and — per the new card-creation workflow — no
         # placeholder cards either: a path only ever gets a card once its
         # metadata is actually done (or failed). "waiting"/"working"
         # paths simply have no widget at all until then; see the
-        # Processing Queue panel (raised over this grid while
-        # self.ai_running) for what to show meanwhile.
-        working_set=set()  # kept for the working_view grace-timer logic below;
-                            # always empty now since "working" cards never render
-        recently_done=[]
-        WV_GRACE_SECONDS=3.0
-        if working_view:
-            now=time.time()
-            wv_done=getattr(self,"_wv_recently_done",{})
-            # Expire anything past the grace window so it doesn't linger
-            # forever once generation is otherwise idle.
-            for p in list(wv_done.keys()):
-                if now-wv_done[p]>WV_GRACE_SECONDS:
-                    del wv_done[p]
-            for p in self._all_paths:
-                if p in wv_done:
-                    recently_done.append(p)
-        # Recently-finished cards are shown FIRST (that's the one the
-        # user just watched complete and wants to actually read), then
-        # whatever's still in flight — instead of yanking a card away
-        # the instant it's done, per feedback that Working View only
-        # gave a "blink" before swapping to the next one.
-        working_paths=(recently_done+[p for p in self._all_paths if p in working_set]) \
-            if working_view else []
-        if working_view and working_paths:
-            # Working View — the display IS the currently in-flight batch
-            # (plus anything that just finished, held briefly so it's
-            # actually readable), not the full list. This is a filter,
-            # not pagination — there's still no page concept underneath.
-            page_paths=working_paths
-        else:
-            # No pagination: every FINISHED image renders in this one
-            # continuously scrolling grid. Anything still waiting/working
-            # is intentionally excluded — see the docstring above.
-            page_paths=[p for p in self._all_paths
-                        if self._results.get(p,{}).get("status") in ("done","failed")]
+        # Processing Queue panel (the progress-bar stats strip) for what
+        # to show meanwhile. (Working View, which used to be a separate
+        # toggle for this, is gone — every finished image just renders
+        # here directly, and the grid auto-scrolls to follow the newest
+        # one in; see _scroll_to_bottom below.)
+        page_paths=[p for p in self._all_paths
+                    if self._results.get(p,{}).get("status") in ("done","failed")]
 
         if not page_paths:
             for c in pool: c.grid_remove()
@@ -1600,6 +1644,7 @@ class App(DnDCTk):
         for p,c in old_card_by_path.items():
             self._sync_card_edits(p,c)
 
+        any_new_card=False
         for i,path in enumerate(page_paths):
             result=self._results.get(path,{"status":"waiting"})
             if i < len(pool):
@@ -1625,6 +1670,7 @@ class App(DnDCTk):
                 self._bind_drag_scroll(card)
                 pool.append(card)
                 self._fade_in_card(card)
+                any_new_card=True
             card.grid(row=i//cols,column=i%cols,sticky="new",padx=4,pady=4)
             new_card_by_path[path]=card
 
@@ -1635,58 +1681,90 @@ class App(DnDCTk):
             pool[j].grid_remove()
 
         self._card_by_path=new_card_by_path
-        if working_view and working_paths:
-            n_active=len(working_set)
-            n_done=len(recently_done)
-            if n_done:
-                self._page_lbl.configure(text=f"⟳ Working ({n_active})  ✓ ({n_done})")
-            else:
-                self._page_lbl.configure(text=f"⟳ Working ({n_active})")
-        else:
-            self._page_lbl.configure(text=f"{total} image{'s' if total!=1 else ''}")
+        self._page_lbl.configure(text=f"{total} image{'s' if total!=1 else ''}")
         self._refresh_view_settings_ui()
+        if cols_changed:
+            self._flash_regrid_transition(list(new_card_by_path.values()))
+        if any_new_card:
+            # Follow the newest card in automatically — this is the direct
+            # replacement for the old Working View toggle: instead of a
+            # separate mode that only showed in-flight cards, the grid
+            # itself just keeps the latest result in view as it arrives.
+            self.after(30,self._scroll_to_bottom)
 
-    def _on_working_view_toggle(self):
-        self.prefs["working_view"]=self.working_view_var.get()
-        save_prefs(self.prefs)
-        self._render_page()
+    def _flash_regrid_transition(self,cards):
+        """Soft dim-then-restore flash applied to every visible card at
+        once, timed around a column-count change (see _render_page) —
+        masks the instant jump of every card relocating to a new
+        row/column and rewrapping to a new width in the same frame, per
+        feedback that the raw reflow "does not look good". One shared
+        step counter driving every card's color together (not N
+        independent per-card animations) keeps this cheap even for a
+        large grid — 8 steps at 18ms = ~145ms total, quick enough not to
+        get in the way of actually using the app."""
+        steps=8
+        def _step(i):
+            t=i/steps
+            # Dip down toward the background for the first half, then
+            # climb back to the resting GLASS color for the second —
+            # a triangle wave, not a one-way fade, since these cards
+            # already have their real content and just need to visually
+            # "settle" into the new layout rather than announce arrival.
+            depth=1-abs((t-0.5)*2)  # 0 -> 1 -> 0 across the animation
+            fg=_lerp_hex(GLASS,BG2,depth*0.6)
+            for card in cards:
+                try:
+                    if card.winfo_exists():
+                        card.configure(fg_color=fg)
+                except Exception:
+                    pass
+            if i<steps and cards:
+                try:
+                    self.after(18,lambda:_step(i+1))
+                except Exception:
+                    pass
+            else:
+                for card in cards:
+                    try:
+                        if card.winfo_exists(): card.configure(fg_color=GLASS)
+                    except Exception:
+                        pass
+        if cards:
+            _step(0)
 
-    def _maybe_refresh_working_view(self,force=False):
+    def _scroll_to_bottom(self):
+        # Force the scrollregion to sync to the CURRENT content bbox
+        # first — CTkScrollableFrame's own lazy update (bound to its
+        # inner frame's <Configure>) doesn't reliably catch up in time
+        # right after a card was just added, which left yview_moveto
+        # trusting a stale/empty scrollregion and silently doing nothing.
+        # Same fix as _scroll_results already needed for the same reason.
+        try:
+            canvas=self._gen_scroll._parent_canvas
+            bbox=canvas.bbox("all")
+            if bbox: canvas.configure(scrollregion=bbox)
+            canvas.yview_moveto(1.0)
+        except Exception:
+            pass
+
+    def _maybe_refresh_grid(self,force=False):
         """Debounced re-render: collapses a burst of near-simultaneous
         status transitions (e.g. concurrency=20 all finishing within the
         same tick) into one render instead of twenty, without losing any
         of them (each call reschedules to the same short delay, so the
-        last one in a burst wins and always fires). Fires whenever
-        Working View is on, OR force=True — force is set by _update_card
-        whenever a path just finished and doesn't have a card yet: since
-        cards are never created for waiting/working paths any more (see
-        _render_page), a newly "done" image needs an actual render to
-        appear at all, Working View or not."""
-        if not (self.working_view_var.get() or force):
+        last one in a burst wins and always fires). force=True is set by
+        _update_card whenever a path just finished and doesn't have a
+        card yet — since cards are never created for waiting/working
+        paths (see _render_page), a newly "done" image needs an actual
+        render to appear at all. (This used to also fire on every tick
+        while a since-removed Working View toggle was on; it's only ever
+        force-triggered now.)"""
+        if not force:
             return
-        if getattr(self,"_wv_refresh_after_id",None):
-            try: self.after_cancel(self._wv_refresh_after_id)
+        if getattr(self,"_grid_refresh_after_id",None):
+            try: self.after_cancel(self._grid_refresh_after_id)
             except Exception: pass
-        self._wv_refresh_after_id=self.after(60,self._render_page)
-        if self.working_view_var.get():
-            self._schedule_wv_sweep()
-
-    def _schedule_wv_sweep(self):
-        """A completed card's grace period (see _render_page) needs to
-        expire even if nothing else happens to trigger a re-render in
-        the meantime — this is what actually removes it once its 3s is
-        up, rather than leaving it stuck until the next real completion
-        happens to come along."""
-        if getattr(self,"_wv_sweep_after_id",None):
-            try: self.after_cancel(self._wv_sweep_after_id)
-            except Exception: pass
-        def _sweep():
-            if self.working_view_var.get() and self.ai_running:
-                self._render_page()
-                self._wv_sweep_after_id=self.after(1000,_sweep)
-            else:
-                self._wv_sweep_after_id=None
-        self._wv_sweep_after_id=self.after(1000,_sweep)
+        self._grid_refresh_after_id=self.after(60,self._render_page)
 
     def _rebuild_card_pools(self):
         """Full teardown — only needed when the underlying file list or
@@ -1875,19 +1953,12 @@ class App(DnDCTk):
         if card is not None:
             card.apply_result(self._results.get(path,{}))
         status=self._results.get(path,{}).get("status")
-        newly_finished=False
-        if status in ("done","failed"):
-            if not hasattr(self,"_wv_recently_done"):
-                self._wv_recently_done={}
-            self._wv_recently_done[path]=time.time()
-            if card is None:
-                # No card exists for this path yet (it was never
-                # "waiting"/"working" on screen — see _render_page) —
-                # this status transition is the ONLY moment it will ever
-                # get one, so a plain Working-View-off render must still
-                # happen here, not just when Working View is on.
-                newly_finished=True
-        self._maybe_refresh_working_view(force=newly_finished)
+        newly_finished=(status in ("done","failed") and card is None)
+        # newly_finished: no card exists for this path yet (it was never
+        # "waiting"/"working" on screen — see _render_page) — this status
+        # transition is the only moment it will ever get one, so a render
+        # must happen here or it would never appear at all.
+        self._maybe_refresh_grid(force=newly_finished)
 
     # ── Pause / Stop ───────────────────────────────────────────────
     def _pause_ai(self):
@@ -2107,16 +2178,16 @@ class App(DnDCTk):
     def _gen_done(self):
         self.ai_running=False; self._ai_paused=False
         # Force a final render right away — cards only ever get created
-        # via the debounced _maybe_refresh_working_view render, and with
+        # via the debounced _maybe_refresh_grid render, and with
         # a fast/high-concurrency batch it's possible for the very last
         # completions to still have a pending debounce timer when the
         # batch itself finishes. Without this, those last images could
         # sit fully "done" in self._results but never actually get a
         # card until something unrelated happened to trigger a render.
-        if getattr(self,"_wv_refresh_after_id",None):
-            try: self.after_cancel(self._wv_refresh_after_id)
+        if getattr(self,"_grid_refresh_after_id",None):
+            try: self.after_cancel(self._grid_refresh_after_id)
             except Exception: pass
-            self._wv_refresh_after_id=None
+            self._grid_refresh_after_id=None
         self._render_page()
         total=len(self._all_paths)
         done=sum(1 for r in self._results.values() if r.get("status")=="done")
