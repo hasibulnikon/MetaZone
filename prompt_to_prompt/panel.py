@@ -1,10 +1,14 @@
 """Prompt-to-Prompt Generator workspace — a standalone page, not tied to
-any image import. One prompt in, N new variations out."""
+any image import. One prompt in, N new variations out — or, in Image to
+Prompt mode, one reference image in, N variations inspired by it out."""
 import os, csv as csv_mod
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, IntVar, BooleanVar
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,AMB_BTN,AMB_DIM,CYAN,ABSOLUTE_BG)
+from ui.dnd import DND_AVAILABLE, DND_FILES
+from core.utils import make_thumb
+from core.constants import IMAGE_EXTS
 from prompt_to_prompt.engine import PromptToPromptEngine, dedupe
 
 COUNT_OPTIONS = [5, 10, 20, 50, 100]
@@ -57,6 +61,22 @@ class PromptToPromptPanel(ctk.CTkFrame):
             font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color=BG1
         ).pack(anchor="w")
 
+        # Mode toggle: From Text (original behavior) vs From Image (new —
+        # one reference image in, N prompts inspired by it out, via the
+        # same vision-capable call path the Prompt Generator page uses).
+        self.mode_var = StringVar(value="text")
+        self._source_image_path = None
+        mode_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        mode_row.pack(anchor="w", pady=(8, 0))
+        self._mode_text_btn = ctk.CTkButton(mode_row, text="📝  From Text", height=30,
+            font=ctk.CTkFont("Segoe UI", 10, "bold"), corner_radius=6,
+            command=lambda: self._set_mode("text"))
+        self._mode_text_btn.pack(side="left", padx=(0, 4))
+        self._mode_image_btn = ctk.CTkButton(mode_row, text="🖼  From Image", height=30,
+            font=ctk.CTkFont("Segoe UI", 10, "bold"), corner_radius=6,
+            command=lambda: self._set_mode("image"))
+        self._mode_image_btn.pack(side="left")
+
         body = ctk.CTkFrame(self, fg_color=BG1, corner_radius=0)
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
         body.grid_columnconfigure(0, weight=1, uniform="ptp")
@@ -74,7 +94,41 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._input_box = ctk.CTkTextbox(left, height=140, font=ctk.CTkFont("Segoe UI", 11),
             fg_color=BG2, text_color=TXT, border_color=GLASS_BDR, border_width=1,
             corner_radius=8, wrap="word")
-        self._input_box.pack(fill="x", padx=14, pady=(0, 12))
+        self._input_box.pack(fill="x", padx=14, pady=(0, 4))
+        self._word_count_lbl = ctk.CTkLabel(left, text="0 words",
+            font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color=GLASS, anchor="e")
+        self._word_count_lbl.pack(anchor="e", padx=14, pady=(0, 8))
+        self._input_box.bind("<KeyRelease>", self._update_word_count)
+
+        # Image to Prompt mode's input: a drag-and-drop zone + thumbnail,
+        # shown instead of the text box (see _set_mode). Built here,
+        # hidden immediately, rather than built lazily on first switch —
+        # so switching modes is instant either direction.
+        self._image_zone = ctk.CTkFrame(left, fg_color=BG2, corner_radius=8,
+            border_width=2, border_color=GLASS_BDR, height=140)
+        self._image_zone.grid_propagate(False)
+        self._image_zone.grid_columnconfigure(0, weight=1)
+        self._image_zone.grid_rowconfigure(0, weight=1)
+        self._image_thumb_lbl = ctk.CTkLabel(self._image_zone, text="🖼\n\nDrag an image here, or click Browse",
+            font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color="transparent", justify="center")
+        self._image_thumb_lbl.grid(row=0, column=0, sticky="nsew")
+        browse_row = ctk.CTkFrame(left, fg_color="transparent")
+        self._browse_row = browse_row
+        self._browse_btn = ctk.CTkButton(browse_row, text="Browse…", height=28, width=90,
+            font=ctk.CTkFont("Segoe UI", 10, "bold"), fg_color=BG3, hover_color=BG4,
+            text_color=TXT2, corner_radius=6, command=self._browse_image)
+        self._browse_btn.pack(side="left")
+        self._image_name_lbl = ctk.CTkLabel(browse_row, text="No image selected",
+            font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color="transparent")
+        self._image_name_lbl.pack(side="left", padx=(10, 0))
+        if DND_AVAILABLE:
+            try:
+                self._image_zone.drop_target_register(DND_FILES)
+                self._image_zone.dnd_bind("<<Drop>>", self._on_image_drop)
+                self._image_thumb_lbl.drop_target_register(DND_FILES)
+                self._image_thumb_lbl.dnd_bind("<<Drop>>", self._on_image_drop)
+            except Exception:
+                pass
 
         ctk.CTkLabel(left, text="Generate", font=ctk.CTkFont("Segoe UI", 10, "bold"),
             text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14)
@@ -143,6 +197,8 @@ class PromptToPromptPanel(ctk.CTkFrame):
             text_color=TXT3, fg_color=GLASS, anchor="w")
         self._prog_lbl.pack(anchor="w", padx=14, pady=(0, 14))
 
+        self._set_mode("text")
+
         # ── RIGHT: output ───────────────────────────────────────────
         right = ctk.CTkFrame(body, fg_color=GLASS, corner_radius=10,
             border_width=1, border_color=GLASS_BDR)
@@ -188,6 +244,57 @@ class PromptToPromptPanel(ctk.CTkFrame):
         for k, b in self._creativity_btns.items():
             b.configure(fg_color=GRN if k == c else BG3, text_color=ABSOLUTE_BG if k == c else TXT2)
 
+    # ── mode toggle (From Text / From Image) ────────────────────────
+    def _set_mode(self, mode):
+        self.mode_var.set(mode)
+        self._mode_text_btn.configure(fg_color=GRN if mode == "text" else BG3,
+            text_color=ABSOLUTE_BG if mode == "text" else TXT2)
+        self._mode_image_btn.configure(fg_color=GRN if mode == "image" else BG3,
+            text_color=ABSOLUTE_BG if mode == "image" else TXT2)
+        if mode == "text":
+            self._image_zone.pack_forget()
+            self._browse_row.pack_forget()
+            self._input_box.pack(fill="x", padx=14, pady=(0, 4))
+            self._word_count_lbl.pack(anchor="e", padx=14, pady=(0, 8))
+        else:
+            self._input_box.pack_forget()
+            self._word_count_lbl.pack_forget()
+            self._image_zone.pack(fill="x", padx=14, pady=(0, 6))
+            self._browse_row.pack(fill="x", padx=14, pady=(0, 12))
+
+    def _update_word_count(self, event=None):
+        text = self._input_box.get("1.0", "end-1c")
+        n = len(text.split())
+        self._word_count_lbl.configure(text=f"{n} word{'s' if n != 1 else ''}")
+
+    def _browse_image(self):
+        exts = " ".join(f"*{e}" for e in IMAGE_EXTS)
+        path = filedialog.askopenfilename(title="Choose a reference image",
+            filetypes=[("Images", exts)])
+        if path:
+            self._load_image(path)
+
+    def _on_image_drop(self, event):
+        raw = event.data
+        paths = [p.strip("{}") for p in raw.split("} {")] if "{" in raw else raw.split()
+        paths = [p.strip("{}") for p in paths]
+        for p in paths:
+            if os.path.splitext(p)[1].lower() in IMAGE_EXTS:
+                self._load_image(p)
+                return
+        messagebox.showinfo("Not an image", "Drop an image file (jpg/png/webp/etc).", parent=self.app)
+
+    def _load_image(self, path):
+        self._source_image_path = path
+        self._image_name_lbl.configure(text=os.path.basename(path))
+        try:
+            img = make_thumb(path, (100, 100))
+            if img is not None:
+                self._image_thumb_lbl.configure(image=img, text="")
+                self._image_thumb_lbl._image = img
+        except Exception:
+            pass
+
     # ── engine wiring ───────────────────────────────────────────────
     def _wire_engine(self):
         self.engine.on_progress = lambda d, t, m: self.app.after(0, self._handle_progress, d, t, m)
@@ -195,20 +302,28 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self.engine.on_error = lambda msg: self.app.after(0, self._handle_error, msg)
 
     def _on_generate(self):
-        text = self._input_box.get("1.0", "end-1c").strip()
-        if not text:
-            messagebox.showinfo("No prompt", "Type or paste a prompt first.", parent=self.app)
-            return
         from engine.ai_providers import get_active_keys
         if not get_active_keys(self.app.prefs):
             messagebox.showerror("No API Keys", "Open 'AI Providers' and add at least one active key.",
                                   parent=self.app)
             return
+        if self.mode_var.get() == "image":
+            if not self._source_image_path:
+                messagebox.showinfo("No image", "Drag an image in, or click Browse, first.", parent=self.app)
+                return
+            source_image, text = self._source_image_path, None
+        else:
+            text = self._input_box.get("1.0", "end-1c").strip()
+            if not text:
+                messagebox.showinfo("No prompt", "Type or paste a prompt first.", parent=self.app)
+                return
+            source_image = None
         self._gen_btn.configure(state="disabled")
         self._pause_btn.configure(state="normal", text="⏸  Pause")
         self._stop_btn.configure(state="normal")
         self._prog_bar.set(0)
-        self.engine.start(text, self.count_var.get(), self.creativity_var.get(), self.style_var.get())
+        self.engine.start(text, self.count_var.get(), self.creativity_var.get(), self.style_var.get(),
+                           source_image=source_image)
 
     def _on_pause(self):
         paused = self.engine.toggle_pause()
@@ -300,10 +415,17 @@ class PromptToPromptPanel(ctk.CTkFrame):
         if not selected:
             messagebox.showinfo("Nothing selected", "Check some prompts first.", parent=self.app)
             return
-        text = self._input_box.get("1.0", "end-1c").strip()
-        if not text:
-            messagebox.showinfo("No prompt", "Type or paste a prompt first.", parent=self.app)
-            return
+        if self.mode_var.get() == "image":
+            if not self._source_image_path:
+                messagebox.showinfo("No image", "Drag an image in, or click Browse, first.", parent=self.app)
+                return
+            source_image, text = self._source_image_path, None
+        else:
+            text = self._input_box.get("1.0", "end-1c").strip()
+            if not text:
+                messagebox.showinfo("No prompt", "Type or paste a prompt first.", parent=self.app)
+                return
+            source_image = None
         keep = [r.text for r in self._rows if not r.selected()]
         n = len(selected)
         self._gen_btn.configure(state="disabled")
@@ -311,4 +433,5 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._stop_btn.configure(state="normal")
         self._prog_bar.set(0)
         self._pending_keep = keep
-        self.engine.start(text, n, self.creativity_var.get(), self.style_var.get())
+        self.engine.start(text, n, self.creativity_var.get(), self.style_var.get(),
+                           source_image=source_image)
