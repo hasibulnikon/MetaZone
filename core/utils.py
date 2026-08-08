@@ -404,13 +404,57 @@ def img_to_b64(path):
           '.tiff':'image/tiff','.tif':'image/tiff'}.get(ext,'image/jpeg')
     return base64.b64encode(data).decode(),mime
 
+def _detect_and_fix_extension(fp):
+    """If a file's real image format doesn't match its extension, ExifTool's
+    format-specific writer refuses to touch it at all — rightly so, since
+    writing (say) PNG-specific chunks into what's actually JPEG binary would
+    corrupt the file, not just produce a warning. This is a real, fairly
+    common occurrence with some AI image-generation tools that export
+    JPEG-encoded data with a .png extension (or vice versa).
+
+    There is no ExifTool flag that overrides this — verified directly
+    against a real exiftool binary: `-m`, `-F`, `-api IgnoreMinorErrors=1`,
+    and an explicit `-fileType=` override all still refuse, because they
+    can't safely do otherwise; the file's actual bytes need the OTHER
+    writer, unconditionally. The only correct fix is to give the file the
+    extension that actually matches its content before writing.
+
+    Returns (path_to_use, note) — note is None if nothing needed to change,
+    otherwise a short human-readable description of what was renamed and
+    why (meant for the caller's log/status output — never silent, since
+    this does change the file's name on disk)."""
+    ext=os.path.splitext(fp)[1].lower().lstrip(".")
+    fmt_to_ext={"JPEG":"jpg","PNG":"png","WEBP":"webp","TIFF":"tif","BMP":"bmp","GIF":"gif"}
+    try:
+        with Image.open(fp) as im:
+            real_fmt=im.format
+    except Exception:
+        return fp,None  # can't even open it -- let exiftool report its own error
+    real_ext=fmt_to_ext.get(real_fmt)
+    if not real_ext or real_ext==ext or (ext=="jpeg" and real_ext=="jpg"):
+        return fp,None
+    new_fp=os.path.splitext(fp)[0]+"."+real_ext
+    if os.path.exists(new_fp):
+        return fp,None  # don't clobber an existing file with that name
+    try:
+        os.rename(fp,new_fp)
+        return new_fp,(f"{os.path.basename(fp)} was actually {real_fmt} data saved with a "
+                        f".{ext} extension — renamed to {os.path.basename(new_fp)} to embed it")
+    except Exception:
+        return fp,None
+
 def embed_metadata_one(et, fp, title="", kw_raw="", desc="", rm_prog=False, rm_copy=False):
     """Write title/keywords/description into a single file via ExifTool.
     Pure function, no UI/state — shared by ui/embed_window.py's CSV-driven
     embed flow and smart_workflow's Stage 6, so the exiftool command
     construction only lives in one place.
-    Returns (ok: bool, message: str) — message is either the affected
-    filename on success or the exiftool error text on failure."""
+    Returns (ok: bool, message: str, final_path: str) — final_path is
+    normally just fp unchanged, but may differ if a real/extension format
+    mismatch was found and fixed first (see _detect_and_fix_extension);
+    callers that do anything else with the file afterward (renaming to
+    title, logging a filename) should use final_path, not the fp they
+    passed in, since fp may no longer exist under that name."""
+    fp,rename_note=_detect_and_fix_extension(fp)
     cmd=[et,'-overwrite_original','-codedcharacterset=UTF8']
     if title: cmd+=[f'-Title={title}',f'-ObjectName={title}',f'-Headline={title}']
     if kw_raw:
@@ -424,10 +468,12 @@ def embed_metadata_one(et, fp, title="", kw_raw="", desc="", rm_prog=False, rm_c
         flags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
         res=subprocess.run(cmd,capture_output=True,text=True,timeout=30,creationflags=flags)
         if res.returncode==0:
-            return True, os.path.basename(fp)
-        return False, (res.stderr or res.stdout or "Unknown").strip()
+            msg=os.path.basename(fp)
+            if rename_note: msg=f"{msg}  ({rename_note})"
+            return True, msg, fp
+        return False, (res.stderr or res.stdout or "Unknown").strip(), fp
     except Exception as ex:
-        return False, str(ex)
+        return False, str(ex), fp
 
 def format_filesize(path):
     try:
