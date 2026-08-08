@@ -1,5 +1,138 @@
 # Changelog
 
+## v0.7.1 — 14-item bug/polish batch from live v0.7 testing
+
+**Embedder "Not a valid PNG (looks more like a JPEG)" on every file:**
+reproduced against a real exiftool binary and tried every plausible bypass
+flag (`-m`, `-F`, `-api IgnoreMinorErrors=1`, an explicit `-fileType=`
+override) — none of them work, and structurally can't: the file is
+genuinely JPEG-encoded data saved with a `.png` extension (common with
+some AI image-generation tools), and ExifTool's PNG writer correctly
+refuses to touch it rather than risk corrupting it. Fixed at the actual
+source: detect the real format via PIL before embedding and rename the
+file to match (e.g. `→ .jpg`) right before writing, never silently —
+the embed log now says exactly what got renamed and why. Verified
+end-to-end against the real binary, including that already-correct files
+are completely unaffected.
+
+**Compact thumbnails missing for most cards:** found a real race in the
+thumbnail delivery pipeline. Cards get reused for a different image
+constantly under the new one-card-per-completion workflow, and nothing
+stopped an in-flight thumbnail request for whatever image *used to* be in
+that slot from landing late and overwriting the *new* image's thumbnail —
+or being the only delivery that ever arrived for that slot. Couldn't
+naturally reproduce the exact timing with small fast test images, so
+forced the race by hand to confirm the mechanism, then fixed it by
+tagging every request with the path it's for and discarding any delivery
+that no longer matches what the widget currently wants. Verified both the
+stale-discard and normal-delivery-still-works cases directly.
+
+**Compact card still too tall despite last update's pass:** found the
+actual culprit — `CTkLabel` silently defaults to `height=28` regardless
+of font size, which was quietly eating most of the "wasted" vertical
+space on every small label in the card. Fixed that everywhere in the
+card, merged Filename+Size onto one line, and collapsed each metadata
+field's header+value from two rows to one ("Title: xyz…"). Height went
+252px → 183px. Also shrank the thumbnail 80px → 64px.
+
+**Working View removed entirely**, replaced with auto-scroll-to-the-
+newest-card: the grid now just follows the latest finished result into
+view on its own, if you were already at (or hadn't left) the bottom.
+Found and fixed a real bug in this replacement before shipping it — the
+scroll would silently do nothing right after a card appeared because the
+canvas's scrollregion hadn't caught up yet; now force-synced on every
+call. Verified against genuinely overflowing content, not just a
+same-screen case that happened to pass trivially.
+
+**Fade-in animation "barely noticeable":** the previous version
+interpolated the card's own background/border color between two shades
+only 10 RGB points apart by design, and didn't touch any of the card's
+child widgets, so almost nothing visibly moved regardless of duration.
+Rewritten: longer (180ms → 320ms, 16 steps), and the border now does a
+genuine flash through the accent color before settling to its resting
+shade, verified by sampling the actual color values through the
+animation.
+
+**Nav bar width +30%** to fit the bigger icons/labels properly.
+
+**Scroll/resize "deformation" during reflow:** added a brief synchronized
+dim-then-restore flash across all visible cards whenever the column count
+actually changes (window resized, Expanded crosses the maximize
+threshold), to mask the instant jump of every card relocating and
+rewrapping to a new width at once. Verified the color genuinely varies
+mid-transition, not just at the two endpoints.
+
+**Expanded view column count now checks real maximize state**, not just
+window width — 2 columns unless the window is actually maximized ("full
+window mode"), 3 if it is, using Tk's own `state()=="zoomed"` check. This
+sandbox has no window manager to actually exercise the maximized branch,
+so that half is unverified here — the "not maximized" branch and the
+graceful fallback are confirmed.
+
+**Whole card now draggable to scroll, not just the thumbnail:** rewrote
+the binding to recursively cover every non-interactive widget in a card
+(labels, status badge, filename, snippets) instead of just two spots,
+while textboxes/buttons stay untouched so editing and clicking still
+work exactly as before. Verified end-to-end by firing a real drag gesture
+starting from a plain label deep in a card.
+
+**Recent Activity panel too tall vs. its row:** same `CTkLabel` height
+bug as the compact card fix, plus each activity entry was two stacked
+lines — collapsed to one line each and reduced from 6 shown to 4, which
+brings its natural height in line with Productivity Insights/System
+Status instead of stretching them with dead space to match it.
+
+**System Status CPU/RAM:** moved to the bottom of the widget. Also added
+a priming call on dashboard load — `psutil.cpu_percent()`'s first-ever
+reading in a process is always a meaningless 0%, which reads exactly
+like "not tracking anything" if that's the first number someone sees —
+and separated "psutil isn't installed" from "psutil installed but a call
+failed at runtime" in the fallback text, for easier diagnosis if this
+comes up again. Can't rule out a PyInstaller-packaging-specific cause
+without the actual built EXE.
+
+**AI Usage: "Est. Cost" replaced with a daily-capacity estimate** — this
+tool is free-providers-only, so a dollar figure was never the right
+number here. Now shows an estimate of how many more images the currently
+stored active keys can process today (active keys × a daily-limit-per-key
+setting, minus requests already made today), with used/total shown too.
+The daily limit is a small editable field, not a hardcoded number:
+looked up current free-tier daily limits and found the public sources
+flatly contradicting each other (anywhere from 50 to 1500 requests/day
+depending on the site), so guessing a single number and presenting it as
+fact would just eventually be quietly wrong for someone. Verified the
+calculation and the live-editable field end-to-end.
+
+**Nav panel blending into the page background on every page except
+Dashboard:** turned out to be a real regression from v0.7's own nav
+rewrite — this app already had a theme-aware `NAV_BG` color (darkens the
+base theme color, or lightens it if the base is already very dark/light,
+so it's never the same tone as whatever's adjacent either way) built for
+exactly this, and the rewrite had quietly reverted to plain `BG2` —
+the same color the Meta Generator/Smart Workflow settings sidebar uses,
+which is why they blended together on those pages specifically. Restored
+`NAV_BG` and added a real 1px border on top of it, so the separation
+holds even where two panels' tones happen to coincide. Verified against
+the settings sidebar's actual live color.
+
+**Prompt-to-Prompt: new "Image to Prompt" mode.** A mode toggle switches
+the left panel between the existing text-prompt input and a new
+drag-and-drop image zone (with thumbnail preview and a Browse… fallback);
+in this mode, one reference image goes through the same vision-capable
+call path the Prompt Generator page already uses, generating N different
+prompts inspired by it instead of N variations of an existing text
+prompt — same creativity/style controls, batching, and dedup machinery
+as the text mode, reused rather than duplicated. Verified end-to-end that
+the image path actually reaches the AI call and that distinct prompts
+come back. Scoped to one reference image rather than a multi-image
+thumbnail grid, given the time available for this batch.
+
+Delivered as changed-files-only: `ui/main_window.py`, `ui/widgets.py`,
+`ui/dashboard.py`, `ui/embed_window.py`, `ui/api_dialog.py`,
+`core/utils.py`, `core/constants.py`, `core/stats_db.py`,
+`prompt_to_prompt/engine.py`, `prompt_to_prompt/panel.py`,
+`engine/prompt_generator.py`, `smart_workflow/pipeline.py`.
+
 ## v0.7 — Complete UI/UX & Card System Refactor, plus the recurring freeze (again) and a scroll bug batch
 
 **The freeze, found again:** a **third** live instance of the exact bug
