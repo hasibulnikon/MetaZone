@@ -71,20 +71,22 @@ def today_summary():
         try:
             today = _today_str()
             rows = conn.execute(
-                "SELECT status,count,meta_score FROM activity WHERE substr(ts,1,10)=?",
+                "SELECT status,count,meta_score,api_requests FROM activity WHERE substr(ts,1,10)=?",
                 (today,)).fetchall()
         finally:
             conn.close()
-    processed = sum(c for _, c, _ in rows)
-    completed = sum(c for st, c, _ in rows if st == "completed")
-    failed = sum(c for st, c, _ in rows if st == "failed")
-    scores = [s for _, _, s in rows if s is not None]
+    processed = sum(c for _, c, _, _ in rows)
+    completed = sum(c for st, c, _, _ in rows if st == "completed")
+    failed = sum(c for st, c, _, _ in rows if st == "failed")
+    scores = [s for _, _, s, _ in rows if s is not None]
     avg_score = (sum(scores) / len(scores)) if scores else None
+    api_requests = sum(r for _, _, _, r in rows)
     return {
         "files_processed": processed,
         "completed": completed,
         "failed": failed,
         "avg_score": avg_score,
+        "api_requests": api_requests,
     }
 
 
