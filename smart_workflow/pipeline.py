@@ -389,9 +389,11 @@ class SmartWorkflowPipeline:
             self._wait_while_paused()
             if self.stop_flag: return
             r = self.results[path]
-            ok, msg = embed_metadata_one(et, path, r.get("title", ""), r.get("kw", ""), r.get("desc", ""))
+            ok, msg, final_path = embed_metadata_one(et, path, r.get("title", ""), r.get("kw", ""), r.get("desc", ""))
             with lock:
                 r["embedded"] = ok
+                if final_path != path:
+                    r["final_path"] = final_path  # extension mismatch was auto-corrected; original path no longer exists
                 if not ok:
                     self.errors.append((os.path.basename(path), msg))
                 done[0] += 1
