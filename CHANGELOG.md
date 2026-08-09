@@ -1,5 +1,140 @@
 # Changelog
 
+## v0.7.2 — Card reflow root-cause, embed freeze root-cause, browser-drag bug, P2P multi-image, and a scaling pass
+
+**Card "constant deforming and reforming" — real structural fix, not
+another animation tweak:** cards were rendered in *import* order, so
+whenever an image finished generating BEFORE an earlier-in-import-order
+image that was still running, every already-on-screen card after it
+would shift position the instant that earlier one finally completed —
+this happens on nearly every batch once there's any real concurrency,
+since completions essentially never land back in import order. Switched
+to rendering in *completion* order instead: a card, once placed, never
+moves again, ever — new completions only ever append. Verified with a
+test that completes images out of their import order and confirms zero
+already-placed cards change position when later ones arrive. This is
+what v0.7.1's fade animation was trying (and failing) to paper over —
+there was never a way to visually mask a card that's actually
+relocating underneath the animation.
+
+**The 70+-file freeze, actually root-caused this time:** clicking Embed
+was calling `find_recursive`/`find_file` once **per CSV row** to locate
+each file — for subfolder search, that's one full `os.walk` of the whole
+folder tree per row, up to 6 of them running concurrently against each
+other during the real embed pass. For a 70-row batch against a real
+nested export folder, that's up to 70 full tree walks (plus preview
+checks) contending for the same disk/OS cache right after the reported
+repro (alt-tabbing to File Explorer, which cold-starts that cache) — a
+completely plausible multi-second-to-much-longer freeze with zero
+progress indicator, not a guess. Replaced with a one-time folder index +
+O(1) lookups, shared between the live match-preview and the actual embed
+pass. Benchmarked at 17x faster on a synthetic tree (scales further with
+real tree size and row count) and verified byte-for-byte identical
+matching behavior to the functions it replaced.
+
+**Dragging an image directly from a browser could fail with a misleading
+"all keys failed" error, and no thumbnail:** confirmed root cause —
+browsers that support this kind of drag write a temporary file to disk
+as part of the operation, and that write isn't guaranteed to be finished
+by the time the drop event fires. The app was accepting the file path
+immediately; a 0-byte or truncated file fails to decode as a thumbnail
+(silently) and then fails AI generation against every single
+provider/key in a row, which reads exactly like "all your keys are bad"
+even though the real problem was that one file. Downloading first always
+worked because a fully-written file on disk doesn't have this race.
+Fixed by validating every dropped file (a brief wait for its size to
+stabilize, then an actual Pillow open+verify) on a background thread
+before accepting it; a file that fails now gets a clear, specific
+warning instead of silently producing a broken card. Verified against a
+truncated file, a 0-byte file, a normal file, and a file that's mid-write
+when checked but finishes shortly after (correctly waited-for and
+accepted). The image formats requested (jpg/jpeg/png/gif/webp/tiff) were
+already fully supported — this wasn't a format gap.
+
+**Prompt-to-Prompt: multi-image support (up to 15), 5×3 thumbnail grid,
+whole-page drag-and-drop, word-count slider, and a Reset button.**
+- Up to 15 reference images now analyzed together in one call (a
+  mood-board style combined reference), shown in a 5×3 thumbnail grid
+  that expands to fill the left panel's remaining vertical space instead
+  of sitting in a small fixed box. Required extending the AI provider
+  layer (`engine/ai_providers.py`) to accept a *list* of image paths, not
+  just one — every existing single-image caller (Meta Generator, Smart
+  Workflow, single-image Image-to-Prompt) is completely unaffected,
+  verified directly against both shapes.
+- The whole page is a drop target now, not just the old thumbnail box —
+  same fix class as an earlier Meta Embedder drag-and-drop bug. Dropping
+  an image anywhere on the page also auto-switches to Image mode.
+- The disabled placeholder "Language" dropdown is gone, replaced with a
+  Prompt Length slider (10–100 words) that's threaded into the actual
+  prompt sent to the AI for both text and image modes.
+- Reset button (top-right of the page) clears generated prompts, the
+  text input, and every reference image — including their cached disk
+  thumbnails, not just the in-memory list.
+- Found and fixed two real bugs during testing, before shipping: clearing
+  many previously-thumbnail-filled slots back-to-back hit a genuine
+  `_tkinter.TclError` inside customtkinter's image handling (reliably
+  reproduced with 15 real slots; didn't reproduce in a plain isolated
+  label, and didn't reproduce in the separate card-pool's own similar
+  code, which was left alone since it showed no problem under the same
+  stress) — worked around with `image=""` instead of `image=None`. And
+  the Reset button's cache cleanup was initially checking the wrong
+  cached-thumbnail size, so it silently didn't delete anything — caught
+  by directly checking the cache file's existence before/after Reset in
+  a test, not by assuming the call succeeded.
+
+**Dashboard: CPU/RAM removed** (were reliably showing N/A regardless of
+v0.7.1's priming/diagnostics — rather than keep two rows that don't
+work, they're gone), **Est. Hours Saved removed**, and the
+Recent Activity / Productivity Insights / System Status row plus the
+padding throughout the rest of the page tightened significantly — the
+`CTkLabel` default-height-28 fix from v0.7.1 only got applied to that
+row's own three boxes then; this pass also cut every inter-section gap
+and shrank the activity chart further (90px → 72px). Verified: at the
+app's normal 900px-tall default window, everything (including the
+Activity chart) now fits without scrolling; at the app's absolute
+minimum window size (700px) it's much closer but still slightly over —
+noted honestly rather than claimed as fully solved at every possible
+size.
+
+**Nav: "Metadata" renamed to "Meta".**
+
+**Expanded card gap between title/description and keywords:** found the
+actual cause — the keywords frame sat in a stretchy grid row with no
+vertical anchor (`sticky="ew"` only), so it centered vertically within
+whatever extra space that row had rather than hugging the top, which is
+what created the odd-looking gap above it. Changed to `sticky="new"`.
+Measured before/after with a deliberately tall card: 270px gap → 34px
+(just the keywords header, which is correct).
+
+**Scaling on different-resolution monitors — partial, honest fix, not a
+full rewrite:** a full conversion of this app's layout from fixed pixel
+values to percentage-based sizing is a much larger undertaking than fits
+in this pass — there are thousands of hardcoded dimensions across a
+2,400+ line file, and doing that properly needs its own dedicated pass,
+not a rushed one bolted onto everything else in this batch. What's
+actually fixed now, and confirmed against a simulated 1280×720 screen:
+the window no longer opens larger than the actual screen (it was a fixed
+1300×900 — wider AND taller than a 720p display, which is exactly the
+reported bug: the window couldn't fit, and its bottom controls were
+pushed out of view with no way to reach them); the minimum window size
+is now screen-relative instead of a fixed floor that left almost no
+margin on a small display; and CustomTkinter's own global widget-scaling
+factor is applied based on how the real screen compares to the ~1920×1080
+display this UI was laid out assuming, so every widget shrinks together
+on a smaller screen instead of a fixed-size handful overflowing while
+nothing else adapts. Verified this holds a normal 1080p window's exact
+original size and 1.0 scaling unchanged (no regression for the common
+case), and that on a simulated 720p screen the window fits entirely
+on-screen with its bottom status bar genuinely visible. This does not
+mean every dimension in the app is now percentage-based — that remains
+open, tracked honestly rather than implied to be done.
+
+Delivered as changed-files-only: `ui/main_window.py`, `ui/widgets.py`,
+`ui/dashboard.py`, `ui/embed_window.py`, `core/utils.py`,
+`core/constants.py`, `prompt_to_prompt/engine.py`,
+`prompt_to_prompt/panel.py`, `engine/prompt_generator.py`,
+`engine/ai_providers.py`.
+
 ## v0.7.1 — 14-item bug/polish batch from live v0.7 testing
 
 **Embedder "Not a valid PNG (looks more like a JPEG)" on every file:**
