@@ -3,7 +3,7 @@ vector/video files via ExifTool."""
 import os, sys, csv, re, subprocess, threading, time, queue
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, StringVar, BooleanVar
-from core.utils import find_exiftool, find_file, find_recursive, embed_metadata_one, set_window_icon
+from core.utils import find_exiftool, find_file, find_recursive, build_file_index, index_lookup, embed_metadata_one, set_window_icon
 from core import stats_db
 from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
     GRN,GRN_H,GRN_DIM,RED_BTN,RED_BTN_H,RED_DIM,LOG_BG,ABSOLUTE_BG,AMB,AMB2)
@@ -283,20 +283,39 @@ class EmbedContent(ctk.CTkFrame):
 
     def _update_match_preview(self):
         """Show how many CSV rows actually resolve to a real file in the
-        chosen location, BEFORE the user commits to starting the embed."""
+        chosen location, BEFORE the user commits to starting the embed.
+        Runs the (potentially slow, for a big nested real folder tree)
+        directory scan on a background thread and applies the result
+        through the app's existing thread-safe queue — this used to call
+        find_file/find_recursive once PER ROW directly on the main
+        thread during construction, which for subfolder search meant up
+        to N full independent os.walk scans blocking the UI with no
+        indicator at all (see build_file_index's docstring — this is the
+        confirmed root cause of a reported freeze on a 70-row batch)."""
         folder=self.folder_path_var.get(); fc=self.col_file_var.get()
         if not folder or not self.csv_rows or not fc or fc=="(skip)":
             self.match_status.configure(text="",fg_color=BG3,text_color=TXT3); return
-        finder=find_recursive if self.subfolder_var.get() else find_file
+        recursive=self.subfolder_var.get()
         use_ext=self.match_only_var.get()
-        matched=0
-        for row in self.csv_rows:
-            fn=(row.get(fc) or "").strip()
-            if fn and finder(folder,fn,use_ext): matched+=1
-        total=len(self.csv_rows)
-        ok=matched==total
-        self.match_status.configure(text=f"🔍 {matched}/{total} files matched",
-            fg_color=GRN_DIM if ok else AMB2,text_color=GRN if ok else AMB)
+        rows=list(self.csv_rows)
+        self._match_epoch=getattr(self,"_match_epoch",0)+1
+        my_epoch=self._match_epoch
+        self.match_status.configure(text="🔍 Checking files…",fg_color=BG3,text_color=TXT3)
+
+        def _work():
+            index=build_file_index(folder,recursive)
+            matched=sum(1 for row in rows
+                        if index_lookup(index,row.get(fc) or "",use_ext))
+            total=len(rows)
+            def _apply():
+                if my_epoch!=self._match_epoch:
+                    return  # a newer check (folder/column/checkbox changed) superseded this one
+                self._file_index=index; self._file_index_key=(folder,recursive)
+                ok=matched==total
+                self.match_status.configure(text=f"🔍 {matched}/{total} files matched",
+                    fg_color=GRN_DIM if ok else AMB2,text_color=GRN if ok else AMB)
+            self._ui_action_queue.put(_apply)
+        threading.Thread(target=_work,daemon=True).start()
 
     def _register_csv_drop(self,widgets):
         """Let the CSV row accept a dragged-in .csv file directly."""
@@ -424,7 +443,17 @@ class EmbedContent(ctk.CTkFrame):
         rm_prog=self.rm_prog_var.get(); rm_copy=self.rm_copy_var.get()
         replace_fn=self.replace_filename_var.get()
         total=len(self.csv_rows)
-        finder=find_recursive if use_sub else find_file
+        # Reuse the index the match-preview already built for this exact
+        # folder+subfolder-search combination if it's still current;
+        # otherwise (e.g. embed was started before the preview finished,
+        # or settings changed since) build it fresh, once, right here —
+        # either way this is ONE scan for the whole batch, not one scan
+        # per row. See build_file_index's docstring for why that matters.
+        if getattr(self,"_file_index",None) is not None and getattr(self,"_file_index_key",None)==(folder,use_sub):
+            index=self._file_index
+        else:
+            index=build_file_index(folder,use_sub)
+            self._file_index=index; self._file_index_key=(folder,use_sub)
         self._ui_action_queue.put(lambda:self._log_msg(f"▶  Started — {total} rows"))
         self._ui_action_queue.put(lambda:(self._embed_prog_bar.set(0),
             self._embed_counts_lbl.configure(text=f"0 succeeded  ·  0 failed  ·  0 not found")))
@@ -446,7 +475,7 @@ class EmbedContent(ctk.CTkFrame):
                 with lock: counts["skipped"]+=1; done[0]+=1
                 self._ui_action_queue.put(_update_progress_ui)
                 return
-            fp=finder(folder,fn,use_ext)
+            fp=index_lookup(index,fn,use_ext)
             if not fp:
                 with lock: counts["skipped"]+=1; done[0]+=1
                 self._ui_action_queue.put(lambda f=fn:(self._log_msg(f"⚠  Not found: {f}"),_update_progress_ui()))
