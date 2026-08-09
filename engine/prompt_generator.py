@@ -117,7 +117,7 @@ def build_meta_prompt(title_c, desc_c, kw_n, custom_prompt="",
     )
 
 
-def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avoid=None):
+def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avoid=None, target_words=None):
     """Prompt-to-Prompt Generator: takes ONE existing prompt and asks for
     `count` new variations inspired by it. Text-only — no image — so this
     is sent through call_with_failover(None, prompt, prefs) rather than
@@ -152,6 +152,9 @@ def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avo
         avoid_note = (f"\n- These prompts already exist — do NOT repeat them or produce "
                        f"near-duplicates of: {sample}")
 
+    length_note = f"\n- Each prompt should be approximately {target_words} words long." \
+        if target_words else ""
+
     return (
         f"You are an expert AI image-generation prompt writer working from an existing "
         f"prompt, creating new variations inspired by it for a stock-content creator.\n\n"
@@ -164,37 +167,37 @@ def build_prompt_to_prompt_prompt(original_prompt, count, creativity, style, avo
         f"- Keep the same general niche/subject category as the original.\n"
         f"- No two prompts may be duplicates or near-duplicates of each other.\n"
         f"- No repeated sentence structures — vary how each prompt opens and is phrased.\n"
-        f"- No trademarked names, brand names, or copyrighted character names.\n"
-        f"- Each prompt must read as a complete, well-formed, polished prompt on its own."
+        f"- No trademarked names, brand names, or copyrighted character names."
+        f"{length_note}"
         f"{avoid_note}\n\n"
         f"Output format: EXACTLY {count} lines, one prompt per line, nothing else — "
         f"no numbering, no bullets, no blank lines, no preamble, no markdown."
     )
 
 
-def build_image_to_prompts_prompt(count, creativity, style, avoid=None):
-    """Prompt-to-Prompt's 'Image to Prompt' mode: takes ONE reference
-    image (sent through call_with_failover WITH a path this time, unlike
-    the text mode, so the vision-capable call path is used) and asks for
-    `count` different prompts inspired by/describing it — same
-    creativity/style controls and avoid-list dedup machinery as the
-    text-to-prompts mode, just anchored on an image instead of an
+def build_image_to_prompts_prompt(count, creativity, style, avoid=None, target_words=None, image_count=1):
+    """Prompt-to-Prompt's 'Image to Prompt' mode: takes one OR SEVERAL
+    reference images (sent through call_with_failover, which now accepts
+    a list of paths — see engine/ai_providers.py's _normalize_paths) and
+    asks for `count` different prompts inspired by them collectively.
+    Same creativity/style controls and avoid-list dedup machinery as the
+    text-to-prompts mode, just anchored on image(s) instead of an
     existing prompt string."""
     creativity_note = {
-        "Low": "Stay close and literal to what's actually in the image — "
+        "Low": "Stay close and literal to what's actually in the image(s) — "
                "small wording changes, synonym swaps, minor detail shifts "
                "between the prompts. Same core subject and composition.",
         "Medium": "Meaningful variety — vary the angle, mood, setting details, "
-                  "or framing you'd imagine around this image's subject, while "
-                  "staying recognizably inspired by it.",
-        "High": "Bold, imaginative variations — use the image as a jumping-off "
+                  "or framing you'd imagine around this subject, while "
+                  "staying recognizably inspired by what's shown.",
+        "High": "Bold, imaginative variations — use the image(s) as a jumping-off "
                 "point rather than a literal description: different angles, "
                 "settings, or interpretations of the same underlying subject "
                 "or style. Still usable for the same commercial purpose.",
-    }.get(creativity, "Meaningful variety — vary the details while staying inspired by the image.")
+    }.get(creativity, "Meaningful variety — vary the details while staying inspired by the image(s).")
 
     style_note = {
-        "Maintain Original": "Match the image's own apparent tone and level of detail.",
+        "Maintain Original": "Match the image(s)' own apparent tone and level of detail.",
         "Commercial": "Polished, commercially safe, broadly marketable — the kind of prompt "
                       "a stock content buyer would want. Avoid anything edgy or niche-limiting.",
         "Creative": "More artistic and evocative language — mood, atmosphere, and visual "
@@ -203,7 +206,7 @@ def build_image_to_prompts_prompt(count, creativity, style, avoid=None):
                    "excess description.",
         "Highly Detailed": "Long, richly detailed prompts covering subject, setting, lighting, "
                            "color palette, composition, and mood.",
-    }.get(style, "Match the image's own apparent tone and detail level.")
+    }.get(style, "Match the image(s)' own apparent tone and detail level.")
 
     avoid_note = ""
     if avoid:
@@ -211,20 +214,32 @@ def build_image_to_prompts_prompt(count, creativity, style, avoid=None):
         avoid_note = (f"\n- These prompts already exist — do NOT repeat them or produce "
                        f"near-duplicates of: {sample}")
 
-    return (
-        f"You are an expert AI image-generation prompt writer working from a "
-        f"reference image, creating new prompts inspired by it for a stock-content creator.\n\n"
+    length_note = f"\n- Each prompt should be approximately {target_words} words long." \
+        if target_words else ""
+
+    image_intro = (
+        f"Look at the {image_count} attached reference images together — treat them as a "
+        f"single combined reference (a mood board), drawing on the subject matter, style, "
+        f"and themes across ALL of them, not just the first one — and generate EXACTLY "
+        f"{count} new, DIFFERENT prompts inspired by them."
+        if image_count > 1 else
         f"Look at the attached image and generate EXACTLY {count} new, DIFFERENT prompts "
-        f"inspired by it.\n\n"
+        f"inspired by it."
+    )
+
+    return (
+        f"You are an expert AI image-generation prompt writer working from "
+        f"reference image(s), creating new prompts inspired by them for a stock-content creator.\n\n"
+        f"{image_intro}\n\n"
         f"Creativity level ({creativity}): {creativity_note}\n"
         f"Style ({style}): {style_note}\n\n"
         f"Rules:\n"
         f"- Every prompt must remain commercially useful stock content.\n"
-        f"- Keep the same general niche/subject category as the image.\n"
+        f"- Keep the same general niche/subject category as the reference image(s).\n"
         f"- No two prompts may be duplicates or near-duplicates of each other.\n"
         f"- No repeated sentence structures — vary how each prompt opens and is phrased.\n"
-        f"- No trademarked names, brand names, or copyrighted character names.\n"
-        f"- Each prompt must read as a complete, well-formed, polished prompt on its own."
+        f"- No trademarked names, brand names, or copyrighted character names."
+        f"{length_note}"
         f"{avoid_note}\n\n"
         f"Output format: EXACTLY {count} lines, one prompt per line, nothing else — "
         f"no numbering, no bullets, no blank lines, no preamble, no markdown."
