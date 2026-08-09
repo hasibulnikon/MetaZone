@@ -12,14 +12,10 @@ from ui.theme import (BG1,BG2,BG3,BG4,GLASS,GLASS_BDR,TXT,TXT2,TXT3,
 from core import stats_db
 from engine.ai_providers import get_active_keys
 
-try:
-    import psutil
-    _HAS_PSUTIL = True
-    _PSUTIL_IMPORT_ERROR = None
-except Exception as _e:
-    _HAS_PSUTIL = False
-    _PSUTIL_IMPORT_ERROR = str(_e)
-    psutil = None
+# psutil / CPU+RAM tracking removed per v0.7.2 request — it was showing
+# N/A for this person regardless of the priming/diagnostics added in
+# v0.7.1, so rather than keep two rows that reliably show nothing useful,
+# they're gone. (See CHANGELOG for what was tried.)
 
 CHART_COLORS = {
     "files_processed": "#3b82f6",
@@ -75,10 +71,10 @@ def _kv_row(parent, label, value, row, value_color=None):
     # quietly a third taller than its 12pt text actually needed.
     ctk.CTkLabel(parent, text=label, font=ctk.CTkFont("Segoe UI", 12),
         text_color=TXT3, fg_color="transparent", anchor="w", height=20
-    ).grid(row=row + 1, column=0, sticky="w", padx=14, pady=3)
+    ).grid(row=row + 1, column=0, sticky="w", padx=14, pady=2)
     lbl = ctk.CTkLabel(parent, text=value, font=ctk.CTkFont("Segoe UI", 12, "bold"),
         text_color=value_color or TXT, fg_color="transparent", anchor="e", height=20)
-    lbl.grid(row=row + 1, column=1, sticky="e", padx=14, pady=3)
+    lbl.grid(row=row + 1, column=1, sticky="e", padx=14, pady=2)
     return lbl
 
 
@@ -90,7 +86,7 @@ def _section(parent, title, icon=""):
     hdr = f"{icon}  {title}" if icon else title
     ctk.CTkLabel(box, text=hdr, font=ctk.CTkFont("Segoe UI", 13, "bold"),
         text_color=TXT, fg_color=GLASS, anchor="w"
-    ).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 6))
+    ).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 4))
     return box
 
 
@@ -98,18 +94,6 @@ class DashboardPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=BG1, corner_radius=0)
         self.app = app
-        if _HAS_PSUTIL:
-            # Prime psutil's internal CPU-delta baseline right away.
-            # psutil.cpu_percent()'s FIRST call ever in a process always
-            # returns a meaningless 0.0 (there's no previous sample yet to
-            # diff against) — every call after that returns a real delta.
-            # Without this warm-up call, the very first real reading a
-            # person sees on opening the dashboard is that meaningless
-            # 0.0%, which reads exactly like "this isn't tracking
-            # anything" even though the next refresh 4s later would have
-            # been correct.
-            try: psutil.cpu_percent(interval=0)
-            except Exception: pass
         self._build()
         self.after(1500, self._auto_refresh)
 
@@ -128,7 +112,7 @@ class DashboardPage(ctk.CTkFrame):
 
         body = ctk.CTkScrollableFrame(self, fg_color=BG1, corner_radius=0,
             scrollbar_button_color=BG3)
-        body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
         body.grid_columnconfigure(0, weight=1)
         self._body = body
 
@@ -136,7 +120,7 @@ class DashboardPage(ctk.CTkFrame):
         ctk.CTkLabel(body, text="Today's Statistics", font=ctk.CTkFont("Segoe UI", 14, "bold"),
             text_color=TXT, fg_color=BG1, anchor="w").pack(anchor="w", padx=4, pady=(4, 8))
         today_row = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        today_row.pack(fill="x", pady=(0, 16))
+        today_row.pack(fill="x", pady=(0, 8))
         for i in range(6): today_row.grid_columnconfigure(i, weight=1, uniform="today")
         self._today_cards = {}
         specs = [("processed", "📁", "Files Processed", "#2563eb"),
@@ -153,7 +137,7 @@ class DashboardPage(ctk.CTkFrame):
 
         # Lifetime + AI Usage + Productivity + System Status (row of 4)
         row2 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row2.pack(fill="x", pady=(0, 16))
+        row2.pack(fill="x", pady=(0, 8))
         for i in range(4): row2.grid_columnconfigure(i, weight=1, uniform="row2")
 
         self._lifetime_box = _section(row2, "Lifetime Statistics")
@@ -190,7 +174,7 @@ class DashboardPage(ctk.CTkFrame):
         for i, (key, label) in enumerate(ai_items):
             self._ai_rows[key] = _kv_row(self._ai_box, label, "—", i)
         edit_row = ctk.CTkFrame(self._ai_box, fg_color="transparent")
-        edit_row.grid(row=len(ai_items) + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 8))
+        edit_row.grid(row=len(ai_items) + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 5))
         ctk.CTkLabel(edit_row, text="Daily limit per key (adjust to match your provider):",
             font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color="transparent"
             ).pack(side="left")
@@ -225,18 +209,20 @@ class DashboardPage(ctk.CTkFrame):
         # Quick Actions); they now have a real home instead of just
         # running their refresh logic for nothing.
         row_mid = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row_mid.pack(fill="x", pady=(0, 16))
+        row_mid.pack(fill="x", pady=(0, 8))
         for i in range(3): row_mid.grid_columnconfigure(i, weight=1, uniform="row_mid")
 
         self._activity_box = _section(row_mid, "Recent Activity")
         self._activity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self._activity_list = ctk.CTkFrame(self._activity_box, fg_color="transparent")
-        self._activity_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=(0, 12))
+        self._activity_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=(0, 8))
 
         self._insights_box = _section(row_mid, "Productivity Insights", "🏆")
         self._insights_box.grid(row=0, column=1, sticky="nsew", padx=6)
         self._insight_rows = {}
-        insight_items = [("week", "Images This Week"), ("hours_saved", "Est. Hours Saved"),
+        # "Est. Hours Saved" removed per request — a rough 30s-per-request
+        # guess never had a solid basis and wasn't worth defending.
+        insight_items = [("week", "Images This Week"),
                           ("requests_saved", "Est. Requests Saved"),
                           ("avg_score", "Avg. Metadata Quality"), ("speed", "Avg. Processing Speed")]
         for i, (key, label) in enumerate(insight_items):
@@ -245,9 +231,15 @@ class DashboardPage(ctk.CTkFrame):
         self._sys_box = _section(row_mid, "System Status")
         self._sys_box.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
         self._sys_rows = {}
+        # CPU/RAM removed per request — they were showing N/A for this
+        # person regardless of the psutil priming/diagnostics added last
+        # round, so rather than keep displaying a permanently-broken
+        # reading, the rows are gone until/unless the underlying cause
+        # (likely PyInstaller not bundling psutil's compiled backend,
+        # per the v0.7.1 notes — still unverified without the built EXE)
+        # is actually confirmed and fixed.
         sys_items = [("worker", "Worker Status"), ("bg_tasks", "Background Tasks"),
-                     ("queue", "Queue Status"), ("smart", "Smart Workflow"),
-                     ("cpu", "CPU Usage"), ("ram", "RAM Usage")]
+                     ("queue", "Queue Status"), ("smart", "Smart Workflow")]
         for i, (key, label) in enumerate(sys_items):
             self._sys_rows[key] = _kv_row(self._sys_box, label, "—", i)
 
@@ -257,7 +249,7 @@ class DashboardPage(ctk.CTkFrame):
         # height as Recent Activity's ~7 rows of text; on its own row it
         # only needs enough height for the plot itself).
         row_bottom = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row_bottom.pack(fill="x", pady=(0, 16))
+        row_bottom.pack(fill="x", pady=(0, 10))
         row_bottom.grid_columnconfigure(0, weight=1)
 
         chart_box = _section(row_bottom, "Activity (Last 7 Days)")
@@ -271,9 +263,9 @@ class DashboardPage(ctk.CTkFrame):
                 font=ctk.CTkFont("Segoe UI", 12)).pack(side="left")
             ctk.CTkLabel(dot, text=CHART_LABELS[key], text_color=TXT3, fg_color="transparent",
                 font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=(2, 0))
-        self._chart_canvas = tkinter.Canvas(chart_box, height=90, bg=BG2,
+        self._chart_canvas = tkinter.Canvas(chart_box, height=72, bg=BG2,
             highlightthickness=0)
-        self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 12))
+        self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
     # ── refresh ─────────────────────────────────────────────────────
     def _auto_refresh(self):
@@ -417,16 +409,11 @@ class DashboardPage(ctk.CTkFrame):
         lt = stats_db.lifetime_summary()
         days, series = stats_db.last_n_days_series(7)
         week_total = sum(series["files_processed"])
-        # Rough estimate: each API request saved represents ~30s of the
-        # manual review it would otherwise have taken — clearly an
-        # estimate, not a measured figure.
-        hours_saved = (lt["total_api_requests_saved"] * 30) / 3600
         avg_score_row = stats_db.today_summary()["avg_score"]
         speed = None
         if lt["total_processing_seconds"] > 0 and lt["total_files_processed"] > 0:
             speed = lt["total_files_processed"] / (lt["total_processing_seconds"] / 60)
         self._apply(self._insight_rows["week"], f"{week_total:,}")
-        self._apply(self._insight_rows["hours_saved"], f"{hours_saved:.1f} h")
         self._apply(self._insight_rows["requests_saved"], f"{lt['total_api_requests_saved']:,}")
         self._apply(self._insight_rows["avg_score"],
             f"{avg_score_row:.1f}%" if avg_score_row is not None else "—")
@@ -443,19 +430,6 @@ class DashboardPage(ctk.CTkFrame):
         if sw_running: bg += 1
         self._apply(self._sys_rows["bg_tasks"], str(bg))
         self._apply(self._sys_rows["queue"], "Processing" if running else "Empty")
-        if _HAS_PSUTIL:
-            try:
-                self._apply(self._sys_rows["cpu"], f"{psutil.cpu_percent(interval=0):.0f}%")
-                self._apply(self._sys_rows["ram"], f"{psutil.virtual_memory().percent:.0f}%")
-            except Exception as e:
-                # Distinct from "psutil isn't installed at all" (N/A,
-                # below) — this means the import succeeded but an actual
-                # call failed at runtime, which is worth telling apart if
-                # this is ever reported again.
-                self._psutil_runtime_error = str(e)
-                self._apply(self._sys_rows["cpu"], "err"); self._apply(self._sys_rows["ram"], "err")
-        else:
-            self._apply(self._sys_rows["cpu"], "N/A"); self._apply(self._sys_rows["ram"], "N/A")
         self._apply(self._sys_rows["smart"], "Running" if sw_running else "Idle",
             color=AMB_BTN if sw_running else TXT3)
 
