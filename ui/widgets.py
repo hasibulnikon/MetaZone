@@ -307,9 +307,17 @@ class MetaResultCard(ctk.CTkFrame):
         # not part of the original left/title/desc map, but keywords need
         # to live somewhere, and a full-width row here keeps title and
         # description as the two side-by-side boxes as specced.
+        # sticky="new", not just "ew": this row (row 1) has weight=1 so it
+        # absorbs any leftover height beyond what title/desc need — with
+        # only "ew" specified, Tk had nothing telling it NOT to center this
+        # frame vertically within that extra space, which is exactly what
+        # was creating the odd-looking gap ABOVE the keywords box (between
+        # it and title/description) instead of below it. "new" pins it to
+        # the top of the row so any leftover space lands below instead,
+        # right where a fixed-height keywords box wouldn't need it anyway.
         kw_wrap=ctk.CTkFrame(self,fg_color="transparent",corner_radius=0)
         kw_wrap.grid(row=1,column=1,columnspan=(2 if self._show_desc else 1),
-            sticky="ew",padx=(6,8),pady=(0,8))
+            sticky="new",padx=(6,8),pady=(0,8))
         kw_wrap.grid_columnconfigure(0,weight=1)
         self._build_field_box(kw_wrap,"kw","Keywords",kw,GRN,63)
 
