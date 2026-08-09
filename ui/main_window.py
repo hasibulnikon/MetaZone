@@ -13,7 +13,8 @@ from core.config import load_prefs, save_prefs
 from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
-from core.utils import find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label, set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache
+from core.utils import (find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label,
+    set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache, wait_stable_and_validate_image)
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
@@ -57,6 +58,28 @@ class App(DnDCTk):
         set_window_icon(self)
         self.prefs=load_prefs()
 
+        # Screen-aware scaling: this UI's dimensions are still fixed
+        # pixel values throughout (a full rewrite to percentage-based
+        # layout for every one of the thousands of hardcoded sizes across
+        # this codebase is a far bigger undertaking than fits in one
+        # pass — flagged honestly rather than half-done; see CHANGELOG).
+        # This applies CustomTkinter's own global widget-scaling
+        # mechanism instead, scaled to how the actual screen compares to
+        # the ~1920x1080 display this UI was laid out assuming — on a
+        # meaningfully smaller screen (a reported real case: a 720p
+        # monitor, where the app opened larger than the screen itself and
+        # its bottom controls were pushed out of view with no way to
+        # reach them), every widget shrinks together instead of a handful
+        # of fixed-size elements overflowing off-screen while the rest of
+        # the app doesn't adapt at all.
+        try:
+            sw,sh=self.winfo_screenwidth(),self.winfo_screenheight()
+            scale=min(1.0, sh/1080, sw/1920)
+            scale=max(scale, 0.6)  # never shrink below 60% -- text needs to stay legible
+            ctk.set_widget_scaling(scale)
+        except Exception:
+            sw=sh=None
+
         self._all_paths=[]; self._results={}
         self._thumb_queue=queue.Queue()
         self._thumb_job_queue=queue.Queue()
@@ -68,6 +91,20 @@ class App(DnDCTk):
         # ever originates on a background thread for this path, which
         # removes the whole class of bug those two turned out to be.
         self._card_by_path={}
+        # Completion order — NOT import order. Cards render in the order
+        # their OWN generation actually finished, appended once and never
+        # reordered after. Rendering by import order instead (the
+        # original approach) meant every already-on-screen card would
+        # shift position whenever an EARLIER-in-import-order image
+        # finished AFTER a later one already had a card — completions
+        # rarely land in import order once there's any real concurrency,
+        # so this was happening on nearly every single completion, which
+        # is what actually caused the "constant deforming and reforming"
+        # complaint — no fade animation was ever going to mask a card
+        # underneath it physically relocating. A path is appended here
+        # exactly once, the first time it reaches done/failed; redoing it
+        # later updates its content in place without moving it.
+        self._completion_order=[]
         self.ai_running=False; self.ai_stop_flag=False
         self._ai_paused=False; self.current_mode="meta"
         self._path_idx={}; self._source_folder=""
@@ -115,7 +152,15 @@ class App(DnDCTk):
 
         self._build_ui()
         self._center(1300,900)
-        self.minsize(1000,700)
+        # Minimum size is also screen-relative now, not a fixed floor —
+        # 1000x700 alone left almost no margin on a 720p display (barely
+        # room for the OS taskbar), which is part of the same real
+        # scaling bug as the window's default size above.
+        try:
+            sw2,sh2=self.winfo_screenwidth(),self.winfo_screenheight()
+            self.minsize(min(1000,int(sw2*0.75)), min(700,int(sh2*0.75)))
+        except Exception:
+            self.minsize(1000,700)
         self.after(200,self._check_et)
         self.after(500,self._online_loop)
         self.after(80,self._poll_thumb_queue)
@@ -162,6 +207,15 @@ class App(DnDCTk):
     def _center(self,w,h):
         self.update_idletasks()
         sw=self.winfo_screenwidth(); sh=self.winfo_screenheight()
+        # Never open larger than the actual screen. A fixed 1300x900
+        # window is both wider AND taller than a 1280x720 display —
+        # this is the confirmed real cause of a reported bug ("the app
+        # was huge, bottom options were not showing at all" on a 720p
+        # monitor): the window plainly could not fit on screen, and
+        # its bottom rows (status bar, action buttons) ended up pushed
+        # past the visible screen area / behind the taskbar with no way
+        # to reach them.
+        w=min(w,int(sw*0.92)); h=min(h,int(sh*0.88))
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
     def ts(self): return datetime.datetime.now().strftime("%H:%M:%S")
@@ -309,7 +363,7 @@ class App(DnDCTk):
         # Settings, License, Help.
         items=[
             ("dashboard","🏠","Dashboard","Home",False),
-            ("metadata_gen","📝","Meta Generator","Metadata",False),
+            ("metadata_gen","📝","Meta Generator","Meta",False),
             ("smart","🚀","Smart Workflow","Smart",False),
             ("embedder","📦","Meta Embedder","Embed",False),
             ("prompt_gen","✨","Prompt Generator","Prompt",False),
@@ -1336,7 +1390,48 @@ class App(DnDCTk):
                         if os.path.isfile(fp): expanded.append(fp)
                 except: pass
             elif os.path.isfile(p): expanded.append(p)
-        self._add_images(expanded)
+        self._validate_and_add_dropped(expanded)
+
+    def _validate_and_add_dropped(self,paths):
+        """Confirms every dropped file is actually a complete, readable
+        image (see wait_stable_and_validate_image's docstring for the
+        real bug this exists to catch — a browser-drag race that used to
+        produce a card with no thumbnail, then a misleading "all API
+        keys failed" error at generation time) before handing accepted
+        files to _add_images. The check itself can briefly block (up to
+        ~1s per file if one needs a moment to finish being written), so
+        it runs on a background thread, never the UI thread."""
+        candidates=[p for p in paths
+                    if os.path.splitext(p)[1].lower() in ALL_SUPPORTED_EXTS]
+        if not candidates:
+            self._add_images(paths)  # nothing recognized -- let _add_images's
+            return                    # own filtering produce its usual no-op
+        def _work():
+            good=[]; bad=[]
+            for p in candidates:
+                ext=os.path.splitext(p)[1].lower()
+                if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
+                    # Not something PIL can open at all -- always was, and
+                    # still is, accepted without this check.
+                    good.append(p); continue
+                ok,reason=wait_stable_and_validate_image(p)
+                if ok: good.append(p)
+                else: bad.append((p,reason))
+            def _apply():
+                if good:
+                    self._add_images(good)
+                if bad:
+                    lines="\n".join(f"•  {os.path.basename(p)} — {reason}" for p,reason in bad[:6])
+                    more=f"\n…and {len(bad)-6} more" if len(bad)>6 else ""
+                    messagebox.showwarning("Some files couldn't be imported",
+                        "These didn't come through as complete, readable images — this "
+                        "usually means they were dragged directly from a web browser rather "
+                        "than from a file already saved to disk (the browser can hand over a "
+                        "file before it's actually finished writing it). Try saving/"
+                        "downloading the image first, then dragging it in from your file "
+                        "manager instead:\n\n"+lines+more,parent=self)
+            self._ui_action_queue.put(_apply)
+        threading.Thread(target=_work,daemon=True).start()
 
     # ── Image import ───────────────────────────────────────────────
     def _browse_images(self):
@@ -1616,8 +1711,10 @@ class App(DnDCTk):
         # toggle for this, is gone — every finished image just renders
         # here directly, and the grid auto-scrolls to follow the newest
         # one in; see _scroll_to_bottom below.)
-        page_paths=[p for p in self._all_paths
-                    if self._results.get(p,{}).get("status") in ("done","failed")]
+        all_paths_set=set(self._all_paths)
+        page_paths=[p for p in self._completion_order
+                    if p in all_paths_set
+                    and self._results.get(p,{}).get("status") in ("done","failed")]
 
         if not page_paths:
             for c in pool: c.grid_remove()
@@ -1929,6 +2026,7 @@ class App(DnDCTk):
     def _clear_results(self):
         self._rebuild_card_pools()
         self._path_idx={}
+        self._completion_order=[]
         try: self._gen_scroll._parent_canvas.yview_moveto(0.0)
         except Exception: pass
         self._gen_count_lbl.configure(text="Generated Metadata (0)")
@@ -1953,6 +2051,8 @@ class App(DnDCTk):
         if card is not None:
             card.apply_result(self._results.get(path,{}))
         status=self._results.get(path,{}).get("status")
+        if status in ("done","failed") and path not in self._completion_order:
+            self._completion_order.append(path)
         newly_finished=(status in ("done","failed") and card is None)
         # newly_finished: no card exists for this path yet (it was never
         # "waiting"/"working" on screen — see _render_page) — this status
