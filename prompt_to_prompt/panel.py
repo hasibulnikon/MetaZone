@@ -47,6 +47,7 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._rows = []
         self._pending_keep = None
         self._build()
+        self._register_page_wide_drop()
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
@@ -54,19 +55,25 @@ class PromptToPromptPanel(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(self, fg_color=BG1, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 10))
-        ctk.CTkLabel(hdr, text="🔄  Prompt-to-Prompt Generator",
+        hdr.grid_columnconfigure(0, weight=1)
+        hdr_left = ctk.CTkFrame(hdr, fg_color=BG1, corner_radius=0)
+        hdr_left.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(hdr_left, text="🔄  Prompt-to-Prompt Generator",
             font=ctk.CTkFont("Segoe UI", 20, "bold"), text_color=TXT, fg_color=BG1
         ).pack(anchor="w")
-        ctk.CTkLabel(hdr, text="Give it one prompt — get back several fresh variations.",
+        ctk.CTkLabel(hdr_left, text="Give it one prompt — get back several fresh variations.",
             font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color=BG1
         ).pack(anchor="w")
+        self._reset_btn = ctk.CTkButton(hdr, text="↺  Reset", width=90, height=32,
+            font=ctk.CTkFont("Segoe UI", 10, "bold"), fg_color=BG3, hover_color=RED_DIM,
+            text_color=TXT2, corner_radius=8, command=self._on_reset)
+        self._reset_btn.grid(row=0, column=1, sticky="ne")
 
         # Mode toggle: From Text (original behavior) vs From Image (new —
         # one reference image in, N prompts inspired by it out, via the
         # same vision-capable call path the Prompt Generator page uses).
         self.mode_var = StringVar(value="text")
-        self._source_image_path = None
-        mode_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        mode_row = ctk.CTkFrame(hdr_left, fg_color="transparent")
         mode_row.pack(anchor="w", pady=(8, 0))
         self._mode_text_btn = ctk.CTkButton(mode_row, text="📝  From Text", height=30,
             font=ctk.CTkFont("Segoe UI", 10, "bold"), corner_radius=6,
@@ -100,35 +107,35 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._word_count_lbl.pack(anchor="e", padx=14, pady=(0, 8))
         self._input_box.bind("<KeyRelease>", self._update_word_count)
 
-        # Image to Prompt mode's input: a drag-and-drop zone + thumbnail,
-        # shown instead of the text box (see _set_mode). Built here,
-        # hidden immediately, rather than built lazily on first switch —
-        # so switching modes is instant either direction.
-        self._image_zone = ctk.CTkFrame(left, fg_color=BG2, corner_radius=8,
-            border_width=2, border_color=GLASS_BDR, height=140)
-        self._image_zone.grid_propagate(False)
-        self._image_zone.grid_columnconfigure(0, weight=1)
-        self._image_zone.grid_rowconfigure(0, weight=1)
-        self._image_thumb_lbl = ctk.CTkLabel(self._image_zone, text="🖼\n\nDrag an image here, or click Browse",
-            font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color="transparent", justify="center")
-        self._image_thumb_lbl.grid(row=0, column=0, sticky="nsew")
+        # Image to Prompt mode's input: up to 15 reference images shown as
+        # a 5x3 thumbnail grid, analyzed together. This frame is packed
+        # with fill="both", expand=True (see _set_mode) so it claims every
+        # bit of vertical space the left panel has left over once
+        # everything below it (Generate, sliders, buttons) has what it
+        # needs — not a small fixed-height box floating above empty space.
+        self._image_grid_frame = ctk.CTkFrame(left, fg_color="transparent")
+        for c in range(5):
+            self._image_grid_frame.grid_columnconfigure(c, weight=1, uniform="imgcol")
+        for r in range(3):
+            self._image_grid_frame.grid_rowconfigure(r, weight=1, uniform="imgrow")
+        self._source_images = []  # up to 15 paths, in slot order
+        self._image_slots = []
+        for i in range(15):
+            slot = self._make_image_slot(self._image_grid_frame, i)
+            slot.grid(row=i // 5, column=i % 5, sticky="nsew", padx=3, pady=3)
+            self._image_slots.append(slot)
+
         browse_row = ctk.CTkFrame(left, fg_color="transparent")
         self._browse_row = browse_row
         self._browse_btn = ctk.CTkButton(browse_row, text="Browse…", height=28, width=90,
             font=ctk.CTkFont("Segoe UI", 10, "bold"), fg_color=BG3, hover_color=BG4,
-            text_color=TXT2, corner_radius=6, command=self._browse_image)
+            text_color=TXT2, corner_radius=6, command=self._browse_images)
         self._browse_btn.pack(side="left")
-        self._image_name_lbl = ctk.CTkLabel(browse_row, text="No image selected",
+        self._image_count_lbl = ctk.CTkLabel(browse_row, text="0 / 15 images — drag anywhere on this page",
             font=ctk.CTkFont("Segoe UI", 9), text_color=TXT3, fg_color="transparent")
-        self._image_name_lbl.pack(side="left", padx=(10, 0))
-        if DND_AVAILABLE:
-            try:
-                self._image_zone.drop_target_register(DND_FILES)
-                self._image_zone.dnd_bind("<<Drop>>", self._on_image_drop)
-                self._image_thumb_lbl.drop_target_register(DND_FILES)
-                self._image_thumb_lbl.dnd_bind("<<Drop>>", self._on_image_drop)
-            except Exception:
-                pass
+        self._image_count_lbl.pack(side="left", padx=(10, 0))
+        # Whole-page drop target, not just this grid — registered once,
+        # recursively, over every widget in the panel (see __init__).
 
         ctk.CTkLabel(left, text="Generate", font=ctk.CTkFont("Segoe UI", 10, "bold"),
             text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14)
@@ -168,11 +175,18 @@ class PromptToPromptPanel(ctk.CTkFrame):
             button_hover_color=BG4, text_color=TXT2, corner_radius=8)
         style_menu.pack(fill="x", padx=14, pady=(4, 12))
 
-        ctk.CTkLabel(left, text="Language", font=ctk.CTkFont("Segoe UI", 10, "bold"),
+        ctk.CTkLabel(left, text="Prompt Length (words)", font=ctk.CTkFont("Segoe UI", 10, "bold"),
             text_color=TXT3, fg_color=GLASS, anchor="w").pack(anchor="w", padx=14)
-        ctk.CTkOptionMenu(left, values=["English"], state="disabled",
-            font=ctk.CTkFont("Segoe UI", 10), fg_color=BG2, button_color=BG2,
-            text_color=TXT3, corner_radius=8).pack(fill="x", padx=14, pady=(4, 14))
+        wc_row = ctk.CTkFrame(left, fg_color="transparent")
+        wc_row.pack(fill="x", padx=14, pady=(4, 14))
+        self.word_target_var = IntVar(value=30)
+        self._word_target_lbl = ctk.CTkLabel(wc_row, text="30 words", width=64,
+            font=ctk.CTkFont("Segoe UI", 10, "bold"), text_color=GRN, fg_color="transparent", anchor="e")
+        self._word_target_lbl.pack(side="right")
+        ctk.CTkSlider(wc_row, from_=10, to=100, number_of_steps=90,
+            variable=self.word_target_var, command=self._on_word_target_change,
+            progress_color=GRN, button_color=TXT, button_hover_color=TXT2,
+            fg_color=BG3, height=16).pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         self._gen_btn = ctk.CTkButton(left, text="✨  Generate", height=42,
             font=ctk.CTkFont("Segoe UI", 12, "bold"), fg_color=GRN, hover_color=GRN_H,
@@ -252,14 +266,17 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._mode_image_btn.configure(fg_color=GRN if mode == "image" else BG3,
             text_color=ABSOLUTE_BG if mode == "image" else TXT2)
         if mode == "text":
-            self._image_zone.pack_forget()
+            self._image_grid_frame.pack_forget()
             self._browse_row.pack_forget()
             self._input_box.pack(fill="x", padx=14, pady=(0, 4))
             self._word_count_lbl.pack(anchor="e", padx=14, pady=(0, 8))
         else:
             self._input_box.pack_forget()
             self._word_count_lbl.pack_forget()
-            self._image_zone.pack(fill="x", padx=14, pady=(0, 6))
+            # fill="both", expand=True: this is what makes the grid claim
+            # all the left panel's remaining vertical space instead of
+            # sitting as a small fixed box with dead space below it.
+            self._image_grid_frame.pack(fill="both", expand=True, padx=14, pady=(0, 6))
             self._browse_row.pack(fill="x", padx=14, pady=(0, 12))
 
     def _update_word_count(self, event=None):
@@ -267,33 +284,167 @@ class PromptToPromptPanel(ctk.CTkFrame):
         n = len(text.split())
         self._word_count_lbl.configure(text=f"{n} word{'s' if n != 1 else ''}")
 
-    def _browse_image(self):
-        exts = " ".join(f"*{e}" for e in IMAGE_EXTS)
-        path = filedialog.askopenfilename(title="Choose a reference image",
-            filetypes=[("Images", exts)])
-        if path:
-            self._load_image(path)
+    def _on_word_target_change(self, value):
+        self._word_target_lbl.configure(text=f"{int(value)} words")
 
-    def _on_image_drop(self, event):
+    # ── multi-image grid (up to 15, 5x3) ─────────────────────────────
+    def _make_image_slot(self, parent, index):
+        slot = ctk.CTkFrame(parent, fg_color=BG2, corner_radius=8,
+            border_width=1, border_color=GLASS_BDR)
+        icon = ctk.CTkLabel(slot, text="+", font=ctk.CTkFont("Segoe UI", 22),
+            text_color=TXT3, fg_color="transparent")
+        icon.place(relx=0.5, rely=0.5, anchor="center")
+        remove_btn = ctk.CTkButton(slot, text="×", width=18, height=18,
+            font=ctk.CTkFont("Segoe UI", 11, "bold"), fg_color=RED_DIM,
+            hover_color=RED_BTN_H, text_color=RED_BTN, corner_radius=9,
+            command=lambda i=index: self._remove_image_slot(i))
+        slot._icon = icon
+        slot._remove_btn = remove_btn
+        for w in (slot, icon):
+            w.bind("<Button-1>", lambda e, i=index: self._on_slot_click(i))
+            w.configure(cursor="hand2")
+        return slot
+
+    def _on_slot_click(self, index):
+        if index < len(self._source_images):
+            return  # occupied -- only the × button removes it
+        self._browse_images(target_index=index)
+
+    def _remove_image_slot(self, index):
+        if index < len(self._source_images):
+            path = self._source_images.pop(index)
+            try:
+                from core.utils import remove_thumb_cache_for
+                remove_thumb_cache_for([path], sizes=((90, 90),))
+            except Exception:
+                pass
+            self._refresh_image_slots()
+
+    def _refresh_image_slots(self):
+        # image="" (not image=None) when clearing a slot's thumbnail: a
+        # real, reproducible crash was found in testing where clearing
+        # many previously-thumbnail-filled labels back to back with
+        # image=None hit "_tkinter.TclError: image ... doesn't exist" —
+        # something about customtkinter/Tk's internal image-name
+        # bookkeeping when several labels release an image reference in
+        # quick succession within the same widget-tree context. Reliably
+        # reproduced with 15 real slots, did not reproduce in a plain
+        # isolated Tk root, and did not reproduce in the separate card
+        # pool's own rebind() path (which clears images the same way, but
+        # more gradually). image="" avoids it entirely and is otherwise
+        # equivalent. Left the card pool's own image=None calls alone
+        # since they didn't reproduce any problem under the same stress.
+        for i, slot in enumerate(self._image_slots):
+            if i < len(self._source_images):
+                path = self._source_images[i]
+                try:
+                    img = make_thumb(path, (90, 90))
+                except Exception:
+                    img = None
+                if img is not None:
+                    slot._icon.configure(image=img, text="")
+                    slot._icon._image = img
+                else:
+                    slot._icon.configure(image="", text="⚠", text_color=AMB_BTN)
+                slot._remove_btn.place(relx=1.0, rely=0.0, x=-2, y=2, anchor="ne")
+            else:
+                slot._icon.configure(image="", text="+", text_color=TXT3)
+                slot._remove_btn.place_forget()
+        n = len(self._source_images)
+        self._image_count_lbl.configure(
+            text=f"{n} / 15 images — drag anywhere on this page" if n < 15
+                 else "15 / 15 images (full)")
+
+    def _browse_images(self, target_index=None):
+        exts = " ".join(f"*{e}" for e in IMAGE_EXTS)
+        remaining = 15 - len(self._source_images)
+        if remaining <= 0:
+            messagebox.showinfo("Full", "You already have 15 reference images — remove one first.",
+                                 parent=self.app)
+            return
+        paths = filedialog.askopenfilenames(title="Choose reference image(s)",
+            filetypes=[("Images", exts)])
+        if paths:
+            self._add_images(list(paths))
+
+    def _add_images(self, paths):
+        remaining = 15 - len(self._source_images)
+        if remaining <= 0:
+            messagebox.showinfo("Full", "You already have 15 reference images — remove one first.",
+                                 parent=self.app)
+            return
+        added = 0
+        for p in paths:
+            if len(self._source_images) >= 15:
+                break
+            if p in self._source_images:
+                continue
+            self._source_images.append(p)
+            added += 1
+        if added:
+            self._refresh_image_slots()
+        if len(paths) > added:
+            messagebox.showinfo("Some images skipped",
+                f"Only added {added} — the reference grid holds up to 15 images at once.",
+                parent=self.app)
+
+    def _on_page_drop(self, event):
         raw = event.data
         paths = [p.strip("{}") for p in raw.split("} {")] if "{" in raw else raw.split()
         paths = [p.strip("{}") for p in paths]
-        for p in paths:
-            if os.path.splitext(p)[1].lower() in IMAGE_EXTS:
-                self._load_image(p)
-                return
-        messagebox.showinfo("Not an image", "Drop an image file (jpg/png/webp/etc).", parent=self.app)
+        images = [p for p in paths if os.path.splitext(p)[1].lower() in IMAGE_EXTS]
+        if not images:
+            return
+        if self.mode_var.get() != "image":
+            self._set_mode("image")
+        self._add_images(images)
 
-    def _load_image(self, path):
-        self._source_image_path = path
-        self._image_name_lbl.configure(text=os.path.basename(path))
-        try:
-            img = make_thumb(path, (100, 100))
-            if img is not None:
-                self._image_thumb_lbl.configure(image=img, text="")
-                self._image_thumb_lbl._image = img
-        except Exception:
-            pass
+    def _register_page_wide_drop(self):
+        """The whole page is a drop target, not just the thumbnail grid —
+        recursively registered over every widget in the panel at build
+        time (same fix class as an earlier drag-and-drop bug in the
+        Meta Embedder page: a drop landing on any OTHER widget than the
+        few narrow ones explicitly registered just went nowhere)."""
+        if not DND_AVAILABLE:
+            return
+        def _reg(w):
+            try:
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind("<<Drop>>", self._on_page_drop)
+            except Exception:
+                pass
+            try:
+                children = w.winfo_children()
+            except Exception:
+                children = []
+            for c in children:
+                _reg(c)
+        _reg(self)
+
+    def _on_reset(self):
+        """Clears everything Prompt-to-Prompt is currently holding: the
+        generated prompt list, the text input, and every reference image
+        — including their disk-cached thumbnails, not just the in-memory
+        list, since the person explicitly asked for the temp folder to be
+        cleaned up too, not just the on-screen state."""
+        if (self._rows or self._source_images or self._input_box.get("1.0","end-1c").strip()) \
+                and not messagebox.askyesno("Reset",
+                "Clear all generated prompts, the current input, and every reference image?",
+                parent=self.app):
+            return
+        self._render_output([])
+        self._input_box.delete("1.0", "end")
+        self._update_word_count()
+        if self._source_images:
+            try:
+                from core.utils import remove_thumb_cache_for
+                remove_thumb_cache_for(list(self._source_images), sizes=((90, 90),))
+            except Exception:
+                pass
+        self._source_images = []
+        self._refresh_image_slots()
+        self._prog_lbl.configure(text="Ready.")
+        self._prog_bar.set(0)
 
     # ── engine wiring ───────────────────────────────────────────────
     def _wire_engine(self):
@@ -308,10 +459,11 @@ class PromptToPromptPanel(ctk.CTkFrame):
                                   parent=self.app)
             return
         if self.mode_var.get() == "image":
-            if not self._source_image_path:
-                messagebox.showinfo("No image", "Drag an image in, or click Browse, first.", parent=self.app)
+            if not self._source_images:
+                messagebox.showinfo("No images", "Drag one or more images in, or click Browse, first.",
+                                     parent=self.app)
                 return
-            source_image, text = self._source_image_path, None
+            source_image, text = list(self._source_images), None
         else:
             text = self._input_box.get("1.0", "end-1c").strip()
             if not text:
@@ -323,7 +475,7 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._stop_btn.configure(state="normal")
         self._prog_bar.set(0)
         self.engine.start(text, self.count_var.get(), self.creativity_var.get(), self.style_var.get(),
-                           source_image=source_image)
+                           source_image=source_image, target_words=self.word_target_var.get())
 
     def _on_pause(self):
         paused = self.engine.toggle_pause()
@@ -416,10 +568,11 @@ class PromptToPromptPanel(ctk.CTkFrame):
             messagebox.showinfo("Nothing selected", "Check some prompts first.", parent=self.app)
             return
         if self.mode_var.get() == "image":
-            if not self._source_image_path:
-                messagebox.showinfo("No image", "Drag an image in, or click Browse, first.", parent=self.app)
+            if not self._source_images:
+                messagebox.showinfo("No images", "Drag one or more images in, or click Browse, first.",
+                                     parent=self.app)
                 return
-            source_image, text = self._source_image_path, None
+            source_image, text = list(self._source_images), None
         else:
             text = self._input_box.get("1.0", "end-1c").strip()
             if not text:
@@ -434,4 +587,4 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._prog_bar.set(0)
         self._pending_keep = keep
         self.engine.start(text, n, self.creativity_var.get(), self.style_var.get(),
-                           source_image=source_image)
+                           source_image=source_image, target_words=self.word_target_var.get())
