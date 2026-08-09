@@ -21,10 +21,23 @@ def _post(url,body,headers,timeout=30):
     except urllib.error.URLError as e:
         raise RuntimeError(f"Network error: {str(e.reason)}")
 
+def _normalize_paths(path):
+    """Every provider call ultimately accepts EITHER a single image path
+    (the original, still-default behavior — Meta Generator, Smart
+    Workflow, single-image Prompt Generator, and Prompt-to-Prompt's
+    original Image mode all still pass a plain string, completely
+    unaffected by this) OR a list of paths, for Prompt-to-Prompt's
+    multi-image Image mode (up to 15 reference images analyzed together
+    in one call). This just normalizes either shape to a list once, so
+    every provider function below can loop over it uniformly."""
+    if not path: return []
+    if isinstance(path,(list,tuple)): return list(path)
+    return [path]
+
 def call_gemini(key,model,path,prompt,max_tokens=2200):
     parts=[{"text":prompt}]
-    if path:
-        b64,mime=img_to_b64(path)
+    for p in reversed(_normalize_paths(path)):
+        b64,mime=img_to_b64(p)
         parts.insert(0,{"inline_data":{"mime_type":mime,"data":b64}})
     r=_post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
         {"contents":[{"parts":parts}],
@@ -35,19 +48,20 @@ def call_gemini(key,model,path,prompt,max_tokens=2200):
 
 def _oa_style_content(path,prompt):
     """Content list shared by every OpenAI-chat-format provider
-    (OpenRouter/OpenAI/Groq/Grok/Mistral) — image part omitted entirely
-    for a text-only call (Prompt-to-Prompt), so those providers never
-    see an image field they didn't ask for."""
+    (OpenRouter/OpenAI/Groq/Grok/Mistral) — image part(s) omitted
+    entirely for a text-only call (Prompt-to-Prompt's text mode), so
+    those providers never see an image field they didn't ask for.
+    Supports one image or several — see _normalize_paths."""
     content=[{"type":"text","text":prompt}]
-    if path:
-        b64,mime=img_to_b64(path)
+    for p in reversed(_normalize_paths(path)):
+        b64,mime=img_to_b64(p)
         content.insert(0,{"type":"image_url","image_url":{"url":f"data:{mime};base64,{b64}"}})
     return content
 
 def _claude_style_content(path,prompt):
     content=[{"type":"text","text":prompt}]
-    if path:
-        b64,mime=img_to_b64(path)
+    for p in reversed(_normalize_paths(path)):
+        b64,mime=img_to_b64(p)
         content.insert(0,{"type":"image","source":{"type":"base64","media_type":mime,"data":b64}})
     return content
 
