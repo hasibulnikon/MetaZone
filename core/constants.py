@@ -3,7 +3,7 @@ keyword/title/description rules, supported file extensions. No logic
 here — just data other modules read.
 """
 
-APP_VERSION = "v0.7.1"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
+APP_VERSION = "v0.7.2"  # bump this on each update: patch (v0.3.1) for small fixes, minor (v0.4) for feature batches
 
 AI_PROVIDERS = {
     "OpenRouter": {
