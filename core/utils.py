@@ -28,6 +28,63 @@ def _app_root():
     main_file = getattr(main_mod,"__file__",None)
     return os.path.dirname(os.path.abspath(main_file)) if main_file else os.getcwd()
 
+def wait_stable_and_validate_image(path,tries=6,delay_ms=150):
+    """Confirms a dropped file is actually a complete, readable image
+    before the app commits to importing it.
+
+    This exists because of a confirmed real bug: dragging an image
+    directly from a web browser (rather than from a file already saved
+    to disk) can hand the OS drag-and-drop payload a file path before
+    the browser has actually finished WRITING that file — browsers that
+    support this kind of drag typically do it by writing a temp copy to
+    disk on the fly, and that write is not guaranteed to be complete by
+    the time the drop event fires. The app would then accept a 0-byte or
+    truncated file, fail to make a thumbnail for it (silently), and later
+    fail AI generation against it for every single provider/key in a row
+    — which reads exactly like "all API keys are bad" even though the
+    actual problem is that specific file, not any key. Downloading first
+    and then dragging from disk always worked, because a file that's
+    already fully written on disk doesn't have this race at all.
+
+    Polls the file size briefly; once it stops changing (and is
+    non-zero), tries to actually open+verify it as an image. Returns
+    (True, None) if it's good, or (False, a short human-readable reason)
+    if not — never raises."""
+    last_size=-1
+    for _ in range(tries):
+        try:
+            size=os.path.getsize(path)
+        except Exception:
+            return False,"file not found"
+        if size>0 and size==last_size:
+            break
+        last_size=size
+        time.sleep(delay_ms/1000)
+    else:
+        return False,"file is incomplete (still being written, or 0 bytes)"
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return True,None
+    except Exception as e:
+        return False,f"not a readable image ({e.__class__.__name__})"
+
+def remove_thumb_cache_for(paths,sizes=((100,100),)):
+    """Deletes the cached disk thumbnail(s) for specific source files —
+    used by Reset-style actions (Prompt-to-Prompt's Image mode reset)
+    that want to clean up their own reference-image thumbnails without
+    touching the shared thumbnail cache other pages still rely on."""
+    cache_dir=_thumb_cache_dir()
+    if not cache_dir: return
+    for p in paths:
+        for size in sizes:
+            try:
+                key=_thumb_cache_key(p,f"box{size[0]}x{size[1]}")
+                fp=os.path.join(cache_dir,key+".jpg")
+                if os.path.exists(fp): os.remove(fp)
+            except Exception:
+                pass
+
 def find_exiftool():
     """Resolve exiftool.exe. Deliberately does NOT fall back to scanning the
     system PATH: a stray/leftover exiftool.exe from some other app's
@@ -262,6 +319,52 @@ def find_recursive(folder,name,match_ext):
             r=find_file(root,name,match_ext)
             if r: return r
     except: pass
+    return None
+
+def build_file_index(folder,recursive):
+    """One-time directory scan producing {lowercased filename: full path}
+    and {lowercased filename-without-extension: full path} lookup dicts.
+
+    This exists because find_file/find_recursive, called once PER CSV ROW
+    (as the embed flow used to do, for both its live match-count preview
+    and the real embed pass), meant an N-row CSV with subfolder search on
+    did up to N entirely independent `os.walk` scans of the same real
+    folder tree — for a real nested folder structure and a 70+ row batch,
+    with up to 6 of those walks running concurrently against each other
+    (the embed pass's own worker pool), this is a genuine, confirmed
+    root cause of an app freeze with no loading indicator, not a guess:
+    walking the same large tree 70 times over instead of once is slow
+    enough on its own, and doing several of those walks concurrently
+    against the same disk/OS directory cache makes it worse, not faster.
+    Building the index ONCE and doing O(1) dict lookups against it for
+    every row (see index_lookup) turns that into a single scan total,
+    regardless of how many rows or how many concurrent workers use it."""
+    exact={}; stem={}
+    def _add(root,files):
+        for f in files:
+            fp=os.path.join(root,f)
+            exact.setdefault(f.lower(),fp)
+            stem.setdefault(os.path.splitext(f)[0].lower(),fp)
+    try:
+        if recursive:
+            for root,dirs,files in os.walk(folder):
+                _add(root,files)
+        else:
+            _add(folder,os.listdir(folder))
+    except Exception:
+        pass
+    return {"exact":exact,"stem":stem}
+
+def index_lookup(index,name,match_ext):
+    """O(1) equivalent of find_file/find_recursive against a pre-built
+    build_file_index() result — same matching semantics (exact filename
+    first, then extension-agnostic basename if match_ext is on)."""
+    name=(name or "").strip()
+    if not name or index is None: return None
+    hit=index["exact"].get(name.lower())
+    if hit: return hit
+    if match_ext:
+        return index["stem"].get(os.path.splitext(name)[0].lower())
     return None
 
 def check_online():
