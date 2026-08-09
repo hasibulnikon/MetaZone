@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.2 — Card reflow root-cause, embed freeze root-cause, browser-drag bug, P2P multi-image, and a scaling pass
+## v0.7.2 — Card reflow root-cause, embed freeze root-cause, browser-drag bug, P2P multi-image, and a scaling pass.
 
 **Card "constant deforming and reforming" — real structural fix, not
 another animation tweak:** cards were rendered in *import* order, so
