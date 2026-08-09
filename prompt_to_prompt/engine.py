@@ -97,27 +97,31 @@ class PromptToPromptEngine:
         self.paused = not self.paused
         return self.paused
 
-    def start(self, original_prompt, count, creativity, style, source_image=None):
+    def start(self, original_prompt, count, creativity, style, source_image=None, target_words=None):
         """source_image=None -> the original text-to-prompts mode.
-        source_image=<path> -> Image to Prompt mode: original_prompt is
-        ignored, the reference image is sent through the vision-capable
-        call path instead (see _run_batches)."""
+        source_image=<path> or <list of paths> -> Image to Prompt mode:
+        original_prompt is ignored, the reference image(s) are sent
+        through the vision-capable call path instead (see _run_batches).
+        A list of up to 15 paths is analyzed together in one call, not
+        as 15 separate calls."""
         self.stop_flag = False
         self.paused = False
         self.results = []
         self.errors = []
         self.running = True
-        threading.Thread(target=self._run, args=(original_prompt, count, creativity, style, source_image),
+        threading.Thread(target=self._run,
+                          args=(original_prompt, count, creativity, style, source_image, target_words),
                           daemon=True).start()
 
     def _run_batches(self, original_prompt, sizes, creativity, style, collected, lock,
-                      progress_base, progress_total, source_image=None):
+                      progress_base, progress_total, source_image=None, target_words=None):
         """Runs one wave of batches concurrently and returns once all of
         them are done. Each batch is given whatever's in `collected` at
         the moment IT starts (not a fixed snapshot from before the wave),
         so later batches in the same wave still benefit from earlier
         ones finishing first."""
         done_counter = [0]
+        image_count = len(source_image) if isinstance(source_image, (list, tuple)) else (1 if source_image else 0)
 
         def worker(batch_n, i):
             self._wait_while_paused()
@@ -126,11 +130,13 @@ class PromptToPromptEngine:
             with lock:
                 avoid_snapshot = list(collected[-20:])
             if source_image:
-                prompt = build_image_to_prompts_prompt(batch_n, creativity, style, avoid=avoid_snapshot)
+                prompt = build_image_to_prompts_prompt(batch_n, creativity, style, avoid=avoid_snapshot,
+                                                        target_words=target_words, image_count=image_count)
                 call_path = source_image
             else:
                 prompt = build_prompt_to_prompt_prompt(
-                    original_prompt, batch_n, creativity, style, avoid=avoid_snapshot)
+                    original_prompt, batch_n, creativity, style, avoid=avoid_snapshot,
+                    target_words=target_words)
                 call_path = None
             try:
                 raw, provider, model_id, key_idx = call_with_failover(
@@ -155,7 +161,7 @@ class PromptToPromptEngine:
         ev.wait()
         return done_counter[0]
 
-    def _run(self, original_prompt, count, creativity, style, source_image=None):
+    def _run(self, original_prompt, count, creativity, style, source_image=None, target_words=None):
         start_time = time.time()
         lock = threading.Lock()
         collected = []
@@ -170,7 +176,7 @@ class PromptToPromptEngine:
         batches = make_batches(count)
         total_batches_est = len(batches)  # for the progress label; may grow below
         self._run_batches(original_prompt, batches, creativity, style, collected, lock,
-                           0, total_batches_est, source_image=source_image)
+                           0, total_batches_est, source_image=source_image, target_words=target_words)
 
         # Concurrent batches inevitably start before earlier ones have
         # populated the avoid-list, so near-duplicate variations get
@@ -188,7 +194,7 @@ class PromptToPromptEngine:
             total_batches_est += len(topup_batches)
             done_so_far = len(batches) + sum(1 for _ in range(extra_rounds))  # rough, label-only
             self._run_batches(original_prompt, topup_batches, creativity, style, collected, lock,
-                               done_so_far, total_batches_est, source_image=source_image)
+                               done_so_far, total_batches_est, source_image=source_image, target_words=target_words)
             self.results = dedupe(collected)
             extra_rounds += 1
 
