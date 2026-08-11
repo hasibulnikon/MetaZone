@@ -14,8 +14,14 @@ import re, threading, time
 from engine.ai_providers import call_with_failover
 from engine.prompt_generator import build_prompt_to_prompt_prompt, build_image_to_prompts_prompt
 from core import stats_db
+from core.utils import prepare_generation_preview
 
-BATCH_SIZE = 10
+BATCH_SIZE = 5  # was 10 -- halved so smaller counts (e.g. the default 10)
+                # get more than a single batch, and progress genuinely
+                # moves in visible steps instead of jumping straight from
+                # 0% to 100% with nothing in between. Doubles the request
+                # count for the same total vs BATCH_SIZE=10, a deliberate
+                # trade favoring visible progress over minimizing calls.
 
 
 def _parse_prompts(raw, expected):
@@ -83,6 +89,7 @@ class PromptToPromptEngine:
         self.results = []  # list of prompt strings, in order produced
         self.errors = []
         self.on_progress = None    # (done, total, msg)
+        self.on_partial = None     # (prompts so far, deduped) -- fires as each batch lands
         self.on_complete = None    # (prompts: list[str])
         self.on_error = None       # (message)
 
@@ -132,7 +139,16 @@ class PromptToPromptEngine:
             if source_image:
                 prompt = build_image_to_prompts_prompt(batch_n, creativity, style, avoid=avoid_snapshot,
                                                         target_words=target_words, image_count=image_count)
-                call_path = source_image
+                # Downscale each reference image to a cached 1280px-edge
+                # JPEG before sending — same reasoning as the Meta
+                # Generator fix: a vision call gains nothing from a
+                # full-resolution upscaled original, and up to 15 of them
+                # in one request makes the upload cost of skipping this
+                # multiply fast.
+                if isinstance(source_image, (list, tuple)):
+                    call_path = [prepare_generation_preview(p) for p in source_image]
+                else:
+                    call_path = prepare_generation_preview(source_image)
             else:
                 prompt = build_prompt_to_prompt_prompt(
                     original_prompt, batch_n, creativity, style, avoid=avoid_snapshot,
@@ -153,6 +169,15 @@ class PromptToPromptEngine:
             if self.on_progress:
                 self.on_progress(progress_base + done_counter[0], progress_total,
                                   f"Generating… batch {progress_base + done_counter[0]}/{progress_total}")
+            if self.on_partial:
+                # Shows prompts actually appearing one batch at a time as
+                # they land, instead of the output staying empty at 0%
+                # then jumping straight to the full list at 100% — per
+                # feedback that a bare progress bar with no interim
+                # content didn't read as "something is happening".
+                with lock:
+                    partial=dedupe(list(collected))
+                self.on_partial(partial)
 
         concurrency = max(1, min(6, int(getattr(self.app, "ai_concurrency_var", None)
                                           and self.app.ai_concurrency_var.get() or 3)))
