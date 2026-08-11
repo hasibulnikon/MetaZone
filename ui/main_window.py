@@ -14,7 +14,8 @@ from core import stats_db
 from ui.dashboard import DashboardPage
 from prompt_to_prompt.panel import PromptToPromptPanel
 from core.utils import (find_exiftool, check_online, make_thumb, make_thumb_min_edge, model_label,
-    set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache, wait_stable_and_validate_image)
+    set_window_icon, clear_thumb_cache, prefetch_thumb_to_cache, wait_stable_and_validate_image,
+    prepare_generation_preview)
 from smart_workflow.panel import SmartWorkflowPanel
 from smart_workflow import state as smart_state
 from engine.ai_providers import call_with_failover, get_active_keys
@@ -340,8 +341,18 @@ class App(DnDCTk):
         # is now a small compound widget — an icon label over a name
         # label — instead of a single-font button) and labels are
         # unchanged text at +1pt.
-        NAV_W=100  # was 76 -- +30% per request, so bigger icons/labels
-                   # (see _make_nav_item) actually have room to breathe
+        NAV_W=200  # doubled per explicit request ("twice the size it is now") —
+                   # the configured value was still 100 from the last +30%
+                   # request, unchanged in code; what actually shrank the
+                   # PERCEIVED size was this same update's screen-aware
+                   # global widget-scaling fix (ctk.set_widget_scaling),
+                   # which scales every dimension in the app down together
+                   # on a smaller-than-1920x1080 screen -- the nav didn't
+                   # regress on its own, but on a scaled-down screen its
+                   # rendered width shrank along with everything else.
+                   # Doubling the configured value here means the nav ends
+                   # up twice as wide as before at ANY scale factor,
+                   # including 1.0 on a full-size display.
         # border_width/border_color: a real separator line, not just a
         # color difference. This project's own Meta Generator/Smart
         # Workflow settings sidebar (_sb_frame) uses BG2, and a previous
@@ -1394,13 +1405,14 @@ class App(DnDCTk):
 
     def _validate_and_add_dropped(self,paths):
         """Confirms every dropped file is actually a complete, readable
-        image (see wait_stable_and_validate_image's docstring for the
-        real bug this exists to catch — a browser-drag race that used to
-        produce a card with no thumbnail, then a misleading "all API
-        keys failed" error at generation time) before handing accepted
-        files to _add_images. The check itself can briefly block (up to
-        ~1s per file if one needs a moment to finish being written), so
-        it runs on a background thread, never the UI thread."""
+        image (see wait_stable_and_validate_image's docstring — it skips
+        essentially all of this cost for a normal already-on-disk file
+        and only actually does any work for one that was modified in the
+        last few seconds, i.e. one that could plausibly still be an
+        in-progress browser-drag temp file) before handing accepted files
+        to _add_images. Runs on a background thread pool — never the UI
+        thread — so even the rare batch where several files DO need the
+        full check doesn't serialize into a slow, sequential wait."""
         candidates=[p for p in paths
                     if os.path.splitext(p)[1].lower() in ALL_SUPPORTED_EXTS]
         if not candidates:
@@ -1408,15 +1420,29 @@ class App(DnDCTk):
             return                    # own filtering produce its usual no-op
         def _work():
             good=[]; bad=[]
-            for p in candidates:
+            lock=threading.Lock()
+            def _check_one(p):
                 ext=os.path.splitext(p)[1].lower()
                 if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
                     # Not something PIL can open at all -- always was, and
                     # still is, accepted without this check.
-                    good.append(p); continue
+                    with lock: good.append(p)
+                    return
                 ok,reason=wait_stable_and_validate_image(p)
-                if ok: good.append(p)
-                else: bad.append((p,reason))
+                with lock:
+                    if ok: good.append(p)
+                    else: bad.append((p,reason))
+            # A small bounded pool, not one thread per file (candidates
+            # could be a very large batch) -- but also not fully
+            # sequential, since the recency check means most real batches
+            # have zero or very few files that actually need the slower
+            # path, and those few shouldn't wait behind each other.
+            threads=[threading.Thread(target=_check_one,args=(p,)) for p in candidates]
+            MAX_CONCURRENT=8
+            for i in range(0,len(threads),MAX_CONCURRENT):
+                batch=threads[i:i+MAX_CONCURRENT]
+                for t in batch: t.start()
+                for t in batch: t.join()
             def _apply():
                 if good:
                     self._add_images(good)
@@ -1633,6 +1659,19 @@ class App(DnDCTk):
         background to actually be seen and read as motion, not just a
         recolor."""
         end_fg=GLASS
+        # The card's OWN _build()/_refresh_status() already set the
+        # correct resting border color before this was ever called (gray
+        # for a plain card, or an accent color for done/failed/working on
+        # CompactEditCard) — capture that as the real target instead of
+        # hardcoding GLASS_BDR, which was a real bug: it silently
+        # overwrote every card's intended status-colored border back to
+        # plain gray the instant its fade-in finished, so no card ever
+        # actually showed a colored border once settled, regardless of
+        # status.
+        try:
+            end_bdr=card.cget("border_color")
+        except Exception:
+            end_bdr=GLASS_BDR
         steps=16
         def _step(i):
             try:
@@ -1642,12 +1681,12 @@ class App(DnDCTk):
                 if t<0.55:
                     bdr=_lerp_hex(BG1,GLASS_BDR_AC,t/0.55)
                 else:
-                    bdr=_lerp_hex(GLASS_BDR_AC,GLASS_BDR,(t-0.55)/0.45)
+                    bdr=_lerp_hex(GLASS_BDR_AC,end_bdr,(t-0.55)/0.45)
                 card.configure(fg_color=fg,border_color=bdr,border_width=1)
                 if i<steps:
                     card.after(20,lambda:_step(i+1))
                 else:
-                    card.configure(border_width=1,border_color=GLASS_BDR)
+                    card.configure(border_width=1,border_color=end_bdr)
             except Exception:
                 pass
         _step(0)
@@ -1748,12 +1787,27 @@ class App(DnDCTk):
                 card=pool[i]
                 if card.path!=path:
                     card.rebind(path,result,on_redo=lambda p=path:self._redo_single(p))
+                    card._last_applied_result=dict(result)
                     if compact:
                         self._request_thumb(path,card._tlbl,min_edge=CompactEditCard.THUMB_MIN_EDGE)
                     else:
                         self._request_thumb(path,card._tlbl,size=(MetaResultCard.THUMB_SIZE,MetaResultCard.THUMB_SIZE))
                 else:
-                    card.apply_result(result)
+                    # Only actually touch the card if its content genuinely
+                    # changed since last applied — this is a real, confirmed
+                    # cause of "cards constantly reshaping while new ones
+                    # generate": _render_page runs on EVERY new completion
+                    # during a batch (not just for the new card), and this
+                    # unconditional apply_result() was doing a full
+                    # delete+reinsert on every textbox of EVERY already-
+                    # settled card on every single one of those passes,
+                    # even though nothing about them had changed at all —
+                    # for a real batch, that's dozens of already-finished
+                    # cards silently re-flashing their content on every new
+                    # completion, for the entire rest of the batch.
+                    if getattr(card,"_last_applied_result",None)!=result:
+                        card.apply_result(result)
+                        card._last_applied_result=dict(result)
             else:
                 if compact:
                     card=CompactEditCard(self._gen_scroll,path,result,
@@ -1768,6 +1822,7 @@ class App(DnDCTk):
                 pool.append(card)
                 self._fade_in_card(card)
                 any_new_card=True
+                card._last_applied_result=dict(result)
             card.grid(row=i//cols,column=i%cols,sticky="new",padx=4,pady=4)
             new_card_by_path[path]=card
 
@@ -2172,7 +2227,21 @@ class App(DnDCTk):
                     ext=os.path.splitext(path)[1].lower()
                     if ext in VECTOR_EXTS or ext in VIDEO_EXTS:
                         raise ValueError("Vector/video: convert to JPG first")
-                    raw,provider,model_id,key_idx=call_with_failover(path,prompt,self.prefs,
+                    # Resolves to a cached, already-downscaled (1280px
+                    # longest edge) JPEG for a large/upscaled original —
+                    # same content, dramatically smaller upload — or the
+                    # original path unchanged if it's already small.
+                    # Sending a full-resolution upscaled file straight to
+                    # the vision API is slow to upload and gains nothing:
+                    # a model doesn't write a better title/description/
+                    # keyword set from extra resolution beyond this. This
+                    # function already existed in core/utils.py but had
+                    # never actually been wired in here — a confirmed
+                    # real regression (generation on upscaled batches
+                    # used to be fast, then quietly went back to
+                    # uploading full-size originals).
+                    send_path=prepare_generation_preview(path)
+                    raw,provider,model_id,key_idx=call_with_failover(send_path,prompt,self.prefs,
                         status_cb=lambda msg:self._ui_action_queue.put(
                             lambda m=msg:self.set_status(f"⟳  {m}",GRN)))
                     if epoch!=self._gen_epoch: return
@@ -2236,7 +2305,7 @@ class App(DnDCTk):
                                     f"produced {len(deduped)} keywords — that is NOT enough. "
                                     f"You MUST output EXACTLY {kn} keywords this time, "
                                     f"comma-separated, no fewer.")
-                                raw2,_,_,_=call_with_failover(path,retry_prompt,self.prefs,
+                                raw2,_,_,_=call_with_failover(send_path,retry_prompt,self.prefs,
                                     status_cb=lambda msg:None)
                                 _,_,kw2=parse_meta(raw2)
                                 kw2=sanitize_keywords_punctuation(kw2)
