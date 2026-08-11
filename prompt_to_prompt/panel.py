@@ -11,7 +11,7 @@ from core.utils import make_thumb
 from core.constants import IMAGE_EXTS
 from prompt_to_prompt.engine import PromptToPromptEngine, dedupe
 
-COUNT_OPTIONS = [5, 10, 20, 50, 100]
+COUNT_OPTIONS = [5, 10, 20, 50, 100, 200]
 CREATIVITY_OPTIONS = ["Low", "Medium", "High"]
 STYLE_OPTIONS = ["Maintain Original", "Commercial", "Creative", "Minimal", "Highly Detailed"]
 
@@ -449,6 +449,7 @@ class PromptToPromptPanel(ctk.CTkFrame):
     # ── engine wiring ───────────────────────────────────────────────
     def _wire_engine(self):
         self.engine.on_progress = lambda d, t, m: self.app.after(0, self._handle_progress, d, t, m)
+        self.engine.on_partial = lambda prompts: self.app.after(0, self._handle_partial, prompts)
         self.engine.on_complete = lambda prompts: self.app.after(0, self._handle_complete, prompts)
         self.engine.on_error = lambda msg: self.app.after(0, self._handle_error, msg)
 
@@ -470,7 +471,7 @@ class PromptToPromptPanel(ctk.CTkFrame):
                 messagebox.showinfo("No prompt", "Type or paste a prompt first.", parent=self.app)
                 return
             source_image = None
-        self._gen_btn.configure(state="disabled")
+        self._gen_btn.configure(state="disabled", text="⏳  Generating…")
         self._pause_btn.configure(state="normal", text="⏸  Pause")
         self._stop_btn.configure(state="normal")
         self._prog_bar.set(0)
@@ -480,6 +481,7 @@ class PromptToPromptPanel(ctk.CTkFrame):
     def _on_pause(self):
         paused = self.engine.toggle_pause()
         self._pause_btn.configure(text="▶  Resume" if paused else "⏸  Pause")
+        self._gen_btn.configure(text="⏸  Paused" if paused else "⏳  Generating…")
 
     def _on_stop(self):
         self.engine.stop()
@@ -489,8 +491,15 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._prog_bar.set(done / total if total else 0)
         self._prog_lbl.configure(text=msg)
 
+    def _handle_partial(self, prompts):
+        # Shows prompts landing progressively as each batch completes,
+        # instead of the output staying empty through the whole run and
+        # only appearing all at once at 100% — per feedback that this
+        # made it look like nothing was happening in between.
+        self._render_output(prompts, partial=True)
+
     def _handle_complete(self, prompts):
-        self._gen_btn.configure(state="normal")
+        self._gen_btn.configure(state="normal", text="✨  Generate")
         self._pause_btn.configure(state="disabled")
         self._stop_btn.configure(state="disabled")
         if self._pending_keep is not None:
@@ -500,18 +509,20 @@ class PromptToPromptPanel(ctk.CTkFrame):
         self._render_output(prompts)
 
     def _handle_error(self, msg):
-        self._gen_btn.configure(state="normal")
+        self._gen_btn.configure(state="normal", text="✨  Generate")
         self._pause_btn.configure(state="disabled")
         self._stop_btn.configure(state="disabled")
         self._prog_lbl.configure(text=msg, text_color=RED_BTN)
         messagebox.showerror("Generation failed", msg, parent=self.app)
 
     # ── output list ─────────────────────────────────────────────────
-    def _render_output(self, prompts):
+    def _render_output(self, prompts, partial=False):
         for w in self._out_scroll.winfo_children():
             w.destroy()
         self._rows = []
         if not prompts:
+            if partial:
+                return  # nothing landed yet -- leave whatever was showing (usually the "Ready" empty state)
             self._empty_lbl = ctk.CTkLabel(self._out_scroll,
                 text="No prompts were generated — try again.",
                 font=ctk.CTkFont("Segoe UI", 11), text_color=TXT3, fg_color=BG1)
@@ -522,8 +533,8 @@ class PromptToPromptPanel(ctk.CTkFrame):
             row = _PromptRow(self._out_scroll, p, self._copy_one)
             row.pack(fill="x", pady=3)
             self._rows.append(row)
-        self._out_count_lbl.configure(text=f"Generated Prompts ({len(prompts)})")
-
+        suffix = " so far" if partial else ""
+        self._out_count_lbl.configure(text=f"Generated Prompts ({len(prompts)}{suffix})")
     def _copy_one(self, text):
         self.app.clipboard_clear(); self.app.clipboard_append(text)
 
