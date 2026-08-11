@@ -1,6 +1,100 @@
 # Changelog
 
-## v0.7.2 — Card reflow root-cause, embed freeze root-cause, browser-drag bug, P2P multi-image, and a scaling pass.
+## v0.7.3 — Upload-size regression, redundant card reflow, fade-in border bug, P2P live progress
+
+**Generation on upscaled images went back to uploading full-size
+originals:** found a real, existing function (`prepare_generation_preview`
+in `core/utils.py`) that downscales an image to a cached 1280px-longest-
+edge JPEG before sending it to a vision API — well-built, clearly made
+for exactly this — that had never actually been wired into the Meta
+Generator's real call path, or Prompt-to-Prompt's Image mode. Every
+generation call was reading and uploading the raw original file
+regardless of size, which for a genuinely upscaled multi-thousand-pixel
+image is a slow upload for no metadata-quality benefit. Wired it into
+both call sites. Verified end-to-end with a real 6000x4000 test image:
+confirmed the AI call now actually receives the cached ~1280px version,
+not the original, with correct caching (near-instant on repeat) and
+small images passed through completely untouched.
+
+**Imports of large/upscaled batches taking 1-2 minutes, instead of
+instant:** this was a regression from v0.7.2's own browser-drag
+protection fix, found by literally benchmarking it — that fix validated
+every single imported file (a stability poll plus a full Pillow decode)
+unconditionally, sequentially, one at a time, which measured at ~150ms
+of pure added overhead per file even for a completely ordinary,
+already-complete file with zero risk of the race it was protecting
+against. For a real hundred-plus-file batch of large images that's
+30–45+ seconds of overhead that didn't exist before that fix. Rewrote it
+to check a file's modification time first: anything older than 5 seconds
+cannot possibly still be mid-write, so it skips straight through with
+zero added cost — only a file modified in roughly the last few seconds
+(i.e., one that could plausibly still be an in-progress browser-drag
+temp file) gets the actual check, now running on a small concurrent pool
+instead of one at a time. Benchmarked: 100 real, already-complete files
+imported in 0.18s (was several seconds minimum, scaling to minutes for a
+real large batch) — and re-verified the original browser-drag protection
+this exists for still catches a genuinely fresh, incomplete file exactly
+as before.
+
+**Cards still visibly reshaping while new ones generate, even after
+v0.7.2's completion-order fix:** that fix stopped cards from changing
+*position*, but found a second, separate real cause — `_render_page()`
+runs on every single new completion during a batch (not just to place
+the new card), and it was calling `apply_result()` unconditionally on
+*every already-displayed card* on every one of those passes, which does
+an unconditional delete-and-reinsert of every textbox's content — even
+though nothing about those already-finished cards had changed at all.
+For a real batch, that means dozens of already-settled cards silently
+re-flashing their full content on every subsequent completion for the
+rest of the run. Fixed by comparing against the last-applied result and
+only touching a card when its content has genuinely changed. Verified
+directly: instrumented a card's textbox to count real delete() calls —
+zero across 5 unrelated completions, exactly one when that specific
+card's own content actually changes.
+
+**Card border color reset to plain gray right after the fade-in
+animation finished, every time, regardless of status:** the fade-in's
+final cleanup step was hardcoded to always land on the plain resting
+border color, silently overwriting whatever status-accent color (e.g.
+green for a Compact card's "done" state) `_build()` had already set
+correctly moments before. So no card ever kept its intended colored
+border once its ~320ms fade-in settled — found while investigating a
+report of the accent border looking incomplete/patchy across a grid of
+cards. Fixed by capturing the card's own already-correct resting color
+at the start of the animation and animating toward *that*, instead of a
+hardcoded value. Verified directly: border color mid-fade shows the
+transitional accent tone, and after the fade completes it now correctly
+holds the real status color instead of reverting to gray.
+
+**Prompt-to-Prompt: no live progress, Generate button never changed,
+and a 200-prompt option.** Root cause for the "0% then instantly 100%"
+progress bar: batches request up to `BATCH_SIZE` prompts per AI call,
+and the previous batch size (10) meant the *default* prompt count (10)
+was exactly one single batch — there was structurally no intermediate
+step to show. Halved the batch size for materially smoother progress on
+common counts, added a live partial-results callback so generated
+prompts now actually appear in the output list progressively as each
+batch lands (not held back until the very end), and fixed the Generate
+button to actually read "Generating…" while a run is in progress instead
+of just graying out with the same unchanged label. Added 200 to the
+prompt-count options. Verified end-to-end: output row count visibly
+grows in steps during a run, button text changes to "Generating…" and
+back to "Generate" at the right moments.
+
+**Nav panel width** — already correctly doubled in the current code from
+the previous update (100→200); the earlier request's fix was intact, and
+what actually made it look "narrow again" was this update's own
+screen-aware global scaling (v0.7.2) applying uniformly to every
+dimension in the app on a smaller-than-reference display, the nav
+included, not a regression in the nav's own configured size. Confirmed
+via direct inspection that the configured value is still 200 (double
+the prior request's 100) independent of whatever scale factor a given
+screen ends up applying.
+
+Delivered as changed-files-only: `ui/main_window.py`, `ui/widgets.py`,
+`core/utils.py`, `prompt_to_prompt/engine.py`, `prompt_to_prompt/panel.py`.
+
+## v0.7.2 — Card reflow root-cause, embed freeze root-cause, browser-drag bug, P2P multi-image, and a scaling pass
 
 **Card "constant deforming and reforming" — real structural fix, not
 another animation tweak:** cards were rendered in *import* order, so
