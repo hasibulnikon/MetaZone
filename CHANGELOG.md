@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.7.4 — Dashboard fills the window instead of leaving dead space below Activity
+
+The Dashboard's content area was a `CTkScrollableFrame` with everything
+packed top-down and sized to its own content — in a maximized/large
+window, that meant a visible band of empty space below the Activity
+chart, since nothing was set up to actually use the extra room. Not
+consistent with this app's move to window-relative, percentage-based
+sizing (v0.7.2) rather than fixed pixel layout.
+
+Restructured the page to a plain grid layout instead: every row above
+the Activity chart keeps its natural content-driven height, and the
+chart's row is the one row configured with `weight=1`, so it's the row
+that absorbs whatever space is actually left over — none in a small
+window, a lot in a maximized one. The chart canvas itself is now
+grid-stretched to fill that row (was a fixed 72px), with a resize
+handler that redraws it at its real current height rather than the
+canvas just rendering blank in the extra space (a plain `Canvas` doesn't
+automatically redraw existing content differently just because it got
+taller). Gave the row a 130px floor so a very short window doesn't
+compress the chart down to near-nothing.
+
+Verified directly: at the app's normal default size the chart renders at
+a sensible height with room to spare; maximized on a simulated 1920x1080
+screen, the chart canvas grows to 312px and visibly fills the window
+with no dead space left below it (screenshot-confirmed); shrunk back
+down, it returns to a compact size without breaking. Confirmed the
+existing blink-suppression and AI-usage-capacity behavior from earlier
+versions still work unchanged.
+
+Delivered as changed-files-only: `ui/dashboard.py`.
+
 ## v0.7.3 — Upload-size regression, redundant card reflow, fade-in border bug, P2P live progress
 
 **Generation on upscaled images went back to uploading full-size
