@@ -110,17 +110,25 @@ class DashboardPage(ctk.CTkFrame):
             font=ctk.CTkFont("Segoe UI", 12), text_color=TXT3, fg_color=BG1
         ).pack(anchor="w")
 
-        body = ctk.CTkScrollableFrame(self, fg_color=BG1, corner_radius=0,
-            scrollbar_button_color=BG3)
+        body = ctk.CTkFrame(self, fg_color=BG1, corner_radius=0)
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
         body.grid_columnconfigure(0, weight=1)
+        # Row 4 (the Activity chart, added below) is the only row that
+        # stretches — everything above it is sized to its own content, so
+        # in a maximized/large window the chart grows to fill whatever's
+        # left instead of the page just leaving dead space underneath it.
+        # This used to be a CTkScrollableFrame with everything pack()ed
+        # top-down, which sized itself to its content and left any extra
+        # window height as visible empty space below — the opposite of
+        # what a percentage/window-relative layout should do.
+        body.grid_rowconfigure(4, weight=1, minsize=130)
         self._body = body
 
         # Today's Statistics
         ctk.CTkLabel(body, text="Today's Statistics", font=ctk.CTkFont("Segoe UI", 14, "bold"),
-            text_color=TXT, fg_color=BG1, anchor="w").pack(anchor="w", padx=4, pady=(4, 8))
+            text_color=TXT, fg_color=BG1, anchor="w").grid(row=0, column=0, sticky="w", padx=4, pady=(4, 8))
         today_row = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        today_row.pack(fill="x", pady=(0, 8))
+        today_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         for i in range(6): today_row.grid_columnconfigure(i, weight=1, uniform="today")
         self._today_cards = {}
         specs = [("processed", "📁", "Files Processed", "#2563eb"),
@@ -137,7 +145,7 @@ class DashboardPage(ctk.CTkFrame):
 
         # Lifetime + AI Usage + Productivity + System Status (row of 4)
         row2 = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row2.pack(fill="x", pady=(0, 8))
+        row2.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         for i in range(4): row2.grid_columnconfigure(i, weight=1, uniform="row2")
 
         self._lifetime_box = _section(row2, "Lifetime Statistics")
@@ -209,7 +217,7 @@ class DashboardPage(ctk.CTkFrame):
         # Quick Actions); they now have a real home instead of just
         # running their refresh logic for nothing.
         row_mid = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row_mid.pack(fill="x", pady=(0, 8))
+        row_mid.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         for i in range(3): row_mid.grid_columnconfigure(i, weight=1, uniform="row_mid")
 
         self._activity_box = _section(row_mid, "Recent Activity")
@@ -249,11 +257,13 @@ class DashboardPage(ctk.CTkFrame):
         # height as Recent Activity's ~7 rows of text; on its own row it
         # only needs enough height for the plot itself).
         row_bottom = ctk.CTkFrame(body, fg_color=BG1, corner_radius=0)
-        row_bottom.pack(fill="x", pady=(0, 10))
+        row_bottom.grid(row=4, column=0, sticky="nsew", pady=(0, 10))
         row_bottom.grid_columnconfigure(0, weight=1)
+        row_bottom.grid_rowconfigure(0, weight=1)
 
         chart_box = _section(row_bottom, "Activity (Last 7 Days)")
         chart_box.grid(row=0, column=0, sticky="nsew")
+        chart_box.grid_rowconfigure(2, weight=1)
         legend = ctk.CTkFrame(chart_box, fg_color="transparent")
         legend.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 4))
         for key, color in CHART_COLORS.items():
@@ -265,7 +275,28 @@ class DashboardPage(ctk.CTkFrame):
                 font=ctk.CTkFont("Segoe UI", 10)).pack(side="left", padx=(2, 0))
         self._chart_canvas = tkinter.Canvas(chart_box, height=72, bg=BG2,
             highlightthickness=0)
-        self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        # sticky="nsew" (not just "ew"): the canvas now actually grows
+        # taller when chart_box's row does, instead of staying pinned to
+        # a fixed 72px with dead space opening up below it. The resize
+        # binding keeps the drawn chart in sync with that new height —
+        # a Canvas doesn't automatically redraw its existing content
+        # differently just because it got taller.
+        self._chart_canvas.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=(0, 8))
+        self._chart_resize_after_id = None
+        self._chart_canvas.bind("<Configure>", self._on_chart_canvas_resize)
+
+    def _on_chart_canvas_resize(self, event):
+        # Debounced: a live window drag fires many Configure events in a
+        # burst, and each real redraw walks 7 days of series data plus
+        # draws every line/point/gridline — not something to do dozens of
+        # times a second mid-drag. Note: no need to re-configure the
+        # canvas's own height here — grid + sticky="nsew" + row weight
+        # already resized it; this event is just notice that it happened,
+        # so all that's needed is to redraw the chart to match.
+        if self._chart_resize_after_id:
+            try: self.after_cancel(self._chart_resize_after_id)
+            except Exception: pass
+        self._chart_resize_after_id = self.after(80, self._refresh_chart)
 
     # ── refresh ─────────────────────────────────────────────────────
     def _auto_refresh(self):
@@ -491,8 +522,9 @@ class DashboardPage(ctk.CTkFrame):
         c = self._chart_canvas
         c.update_idletasks()
         w = max(c.winfo_width(), 200)
+        h_now = max(c.winfo_height(), 40)
         days, series = stats_db.last_n_days_series(7)
-        cache_key = (w, days, tuple(tuple(v) for v in series.values()))
+        cache_key = (w, h_now, days, tuple(tuple(v) for v in series.values()))
         # Same fix as Recent Activity: a canvas delete("all")+full redraw
         # every 4s reads as a flash even though the underlying numbers
         # rarely change that often. Skip it entirely when nothing that
@@ -502,8 +534,14 @@ class DashboardPage(ctk.CTkFrame):
             return
         self._last_chart_key = cache_key
         c.delete("all")
+        # winfo_height(), not cget("height"): the canvas is now
+        # grid-stretched to fill its row (see the resize binding above),
+        # and cget("height") would keep reporting the original fixed
+        # value it was constructed with, not the actual current size —
+        # which is exactly what would have kept the chart small even
+        # after the row around it grew to fill the window.
         try:
-            h = int(c.cget("height"))
+            h = max(c.winfo_height(), 40)
         except Exception:
             h = 180
         pad_l, pad_r, pad_t, pad_b = 34, 10, 10, 20
